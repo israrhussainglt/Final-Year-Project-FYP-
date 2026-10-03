@@ -142,6 +142,22 @@ a:active,
   display: none;
 }
 
+/* Scan line on the landing hero's CNIC card — the red sweep that hints the
+   QR being read by a responder. Position is animated (not transformed) so
+   the line stays inside the QR box's overflow clip. */
+@keyframes pulseid-scan {
+  0%,
+  100% {
+    top: 4%;
+  }
+  50% {
+    top: 92%;
+  }
+}
+.scanline {
+  animation: pulseid-scan 2.8s ease-in-out infinite;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Print styles for the detailed Medical Report (patient + doctor views). */
 /* ---------------------------------------------------------------------- */

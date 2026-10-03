@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PulseMark } from "@/components/PulseMark";
-import { Card, Badge } from "@/components/ui";
 import { landingCopy, type Lang, type LandingCopy } from "@/lib/landing-i18n";
 
 type View = "launcher" | "website";
@@ -59,15 +58,17 @@ export function LandingApp() {
 
   return (
     <div dir={t.dir} className={lang === "ur" ? "lang-ur" : undefined}>
-      <FloatingControls
-        standalone={standalone}
-        view={view}
-        onToggleView={toggleView}
-        lang={lang}
-        onToggleLang={toggleLang}
-        t={t}
-      />
-      {view === "launcher" ? <Launcher t={t} /> : <Website t={t} />}
+      {view === "launcher" && (
+        <FloatingControls
+          standalone={standalone}
+          view={view}
+          onToggleView={toggleView}
+          lang={lang}
+          onToggleLang={toggleLang}
+          t={t}
+        />
+      )}
+      {view === "launcher" ? <Launcher t={t} /> : <Website t={t} onToggleView={toggleView} onToggleLang={toggleLang} />}
     </div>
   );
 }
@@ -86,6 +87,8 @@ function FloatingControls({
   onToggleLang: () => void;
   t: LandingCopy;
 }) {
+  void standalone;
+  void view;
   return (
     <div className="fixed top-0 inset-x-0 z-50 safe-top safe-x pointer-events-none">
       <div className="max-w-6xl mx-auto px-4 pt-3 flex items-center justify-between">
@@ -188,182 +191,410 @@ function Launcher({ t }: { t: LandingCopy }) {
 
 // ---------- Full marketing website ----------
 
-function Website({ t }: { t: LandingCopy }) {
-  const arrow = t.dir === "rtl" ? "←" : "→";
-  const bulletPrefix = t.dir === "rtl" ? "" : "• ";
-  const bulletSuffix = t.dir === "rtl" ? " •" : "";
+// Tiny inline icon set (stroke icons, currentColor) — kept local to the
+// landing page since only this view uses them.
+function I({ d, className = "w-[22px] h-[22px]" }: { d: string; className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {d.split("|").map((path, i) => (
+        <path key={i} d={path} />
+      ))}
+    </svg>
+  );
+}
+
+const ICONS = {
+  lock: "M5 11h14v9H5z|M8 11V8a4 4 0 0 1 8 0v3",
+  shield: "M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z|M9 12l2 2 4-4",
+  log: "M5 4h14v16H5z|M9 9h6M9 13h6M9 17h3",
+  scan: "M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16",
+  users: "M9 8a3 3 0 1 0 0-.01M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 5a3 3 0 0 1 0 6M18 14c2 .7 3 2.6 3 5",
+  clock: "M12 12a9 9 0 1 0 0-.01M12 7v5l3 2",
+  cross: "M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z",
+  user: "M12 8a4 4 0 1 0 0-.01M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8",
+  chev: "M6 9l6 6 6-6",
+};
+
+// Deterministic decorative QR pattern for the hero card (same algorithm as
+// the design mockup) — purely illustrative, never a real token.
+function QrPattern() {
+  const n = 13;
+  const cell = (x: number, y: number) => {
+    const finder = (x < 4 && y < 4) || (x > 8 && y < 4) || (x < 4 && y > 8);
+    if (finder) {
+      const a = x < 4 ? x : x - 9;
+      const b = y < 4 ? y : y - 9;
+      return a === 0 || a === 3 || b === 0 || b === 3 || (a === 1 && b === 1) || (a === 2 && b === 2) || (a === 1 && b === 2) || (a === 2 && b === 1);
+    }
+    return (x * 7 + y * 13 + x * y) % 5 < 2;
+  };
+  const rects: string[] = [];
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (cell(x, y)) rects.push(`M${x} ${y}h1v1h-1z`);
+    }
+  }
+  return (
+    <svg viewBox="0 0 13 13" className="w-full h-full" shapeRendering="crispEdges" aria-hidden="true">
+      <path d={rects.join(" ")} fill="#12262B" />
+    </svg>
+  );
+}
+
+function LoginDropdown({ t }: { t: LandingCopy }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const items = [
+    { href: "/doctor/login", icon: ICONS.cross, title: t.navDoctor, desc: t.loginDescDoctor },
+    { href: "/hospital-admin/login", icon: ICONS.users, title: t.navAdmin, desc: t.loginDescAdmin },
+    { href: "/patient/login", icon: ICONS.user, title: t.navPatient, desc: t.loginDescPatient },
+  ];
 
   return (
-    <main className="min-h-screen flex flex-col">
-      <header className="px-6 md:px-10 pt-20 pb-6 flex flex-wrap items-center justify-between gap-4 max-w-6xl mx-auto w-full">
-        <Link
-          href="/"
-          aria-label="PulseID home"
-          className="flex items-center gap-3 rounded-md focus-ring transition-opacity hover:opacity-80"
-        >
-          <span className="font-display italic text-xl">{t.brand}</span>
-        </Link>
-        <div className="flex items-center gap-4 min-w-0">
-          <span className="eyebrow text-sage hidden lg:inline shrink-0">{t.eyebrowNetwork}</span>
-          <nav
-            aria-label={t.navAriaLabel}
-            className="min-w-0 max-w-full overflow-x-auto no-scrollbar snap-x rounded-full border border-line bg-white/95 backdrop-blur shadow-card p-1.5"
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="true"
+        aria-expanded={open}
+        className="focus-ring inline-flex items-center gap-2 rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-white hover:bg-ink/90 transition-colors"
+      >
+        <I d={ICONS.user} className="w-[18px] h-[18px]" />
+        {t.navLogin}
+        <I d={ICONS.chev} className={`w-4 h-4 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      <div
+        className={`absolute top-full end-0 mt-3 w-[350px] max-w-[calc(100vw-2.5rem)] rounded-3xl border border-line bg-white p-2 shadow-[0_36px_80px_-24px_rgba(11,32,39,0.3),0_2px_8px_rgba(11,32,39,0.06)] transition-all duration-150 ${
+          open ? "opacity-100 translate-y-0 visible" : "opacity-0 -translate-y-2 invisible"
+        }`}
+        role="menu"
+      >
+        {items.map((item) => (
+          <Link
+            key={item.href}
+            href={item.href}
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="focus-ring flex items-center gap-3.5 p-3.5 rounded-2xl hover:bg-teal-light transition-colors"
           >
-            {/* Scrollable portal strip: the four role links stay on one line
-                at any width — narrow screens scroll the strip instead of
-                wrapping it into a second row. The surface matches the
-                floating view/language toggles so the header reads as one
-                design system; RTL flips the scroll direction natively. */}
-            <div className="flex items-center gap-1">
-              {[
-                { href: "/doctor/login", label: t.navDoctor, cls: "text-sage hover:text-ink hover:bg-paper" },
-                { href: "/hospital-admin/login", label: t.navAdmin, cls: "text-sage hover:text-ink hover:bg-paper" },
-                { href: "/patient/login", label: t.navPatient, cls: "bg-teal-light text-teal-dark hover:bg-teal-light/70" },
-                { href: "/emergency/scan", label: t.navEmergency, cls: "text-alert hover:bg-alert/10" },
-              ].map((role) => (
-                <Link
-                  key={role.href}
-                  href={role.href}
-                  className={`focus-ring shrink-0 snap-start whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${role.cls}`}
-                >
-                  {role.label}
-                </Link>
-              ))}
-            </div>
-          </nav>
+            <span className="w-11 h-11 rounded-2xl bg-teal-light text-teal grid place-items-center shrink-0">
+              <I d={item.icon} />
+            </span>
+            <span>
+              <b className="block font-semibold text-ink leading-snug">{item.title}</b>
+              <small className="block text-sage text-sm leading-snug mt-0.5">{item.desc}</small>
+            </span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function Website({ t, onToggleView, onToggleLang }: { t: LandingCopy; onToggleView: () => void; onToggleLang: () => void }) {
+  const btnTeal = "inline-flex items-center justify-center gap-2 rounded-full bg-teal px-7 py-3 text-sm font-semibold text-white hover:bg-teal-dark transition-colors";
+  const btnLine = "inline-flex items-center justify-center gap-2 rounded-full border-[1.5px] border-ink px-7 py-3 text-sm font-semibold text-ink hover:bg-ink hover:text-white transition-colors";
+  const btnAlertSm = "inline-flex items-center gap-2 rounded-full bg-alert px-5 py-2.5 text-sm font-semibold text-white hover:bg-alert/90 transition-colors";
+
+  return (
+    <main id="top">
+      {/* ---------- Sticky nav ---------- */}
+      <nav className="sticky top-0 z-40 safe-top bg-paper/90 backdrop-blur-md border-b border-line">
+        <div className="max-w-6xl mx-auto px-6 md:px-10 h-[68px] md:h-[76px] flex items-center gap-4 md:gap-8">
+          <Link href="/" className="flex items-center gap-2.5 me-auto focus-ring rounded-md" aria-label="PulseID home">
+            <PulseMark className="w-9 h-6" />
+            <span className="font-display text-[22px]">{t.brand}</span>
+          </Link>
+          <button
+            type="button"
+            onClick={onToggleLang}
+            lang={t.dir === "rtl" ? "en" : "ur"}
+            dir={t.dir === "rtl" ? "ltr" : "rtl"}
+            className="focus-ring text-sm font-medium text-sage hover:text-ink transition-colors py-2"
+          >
+            {t.langToggle}
+          </button>
+          <Link href="/emergency/scan" className={`${btnAlertSm} hidden sm:inline-flex`}>
+            <I d={ICONS.scan} className="w-[18px] h-[18px]" />
+            {t.navEmergency}
+          </Link>
+          <LoginDropdown t={t} />
+          <button
+            type="button"
+            onClick={onToggleView}
+            title={t.viewToggleToApp}
+            aria-label={t.viewToggleToApp}
+            className="focus-ring hidden lg:inline-grid place-items-center w-9 h-9 rounded-full border border-line text-sage hover:text-ink transition-colors"
+          >
+            <ToggleIcon />
+          </button>
         </div>
-      </header>
+      </nav>
 
       {/* ---------- Hero ---------- */}
-      <section className="px-6 md:px-10 max-w-5xl mx-auto w-full pt-8 pb-16">
-        <PulseMark className="w-40 h-8 mb-8" />
-        <h1 className="font-display text-4xl md:text-6xl leading-[1.15] max-w-3xl">
-          {t.heroTitlePre}
-          <span className="italic text-teal">{t.heroTitleHighlight}</span>
-          {t.heroTitlePost}
-        </h1>
-        <p className="mt-6 text-sage text-lg max-w-xl leading-relaxed">{t.heroBody}</p>
+      <section className="bg-[radial-gradient(55%_75%_at_82%_35%,#E4F2F1_0,rgba(255,255,255,0)_70%)]">
+        <div className="max-w-6xl mx-auto px-6 md:px-10 pt-14 md:pt-20 pb-16 md:pb-24 grid lg:grid-cols-[1.08fr_0.92fr] gap-12 lg:gap-16 items-center">
+          <div>
+            <h1 className="font-display text-[clamp(38px,5.5vw,72px)] leading-[1.05] tracking-tight">
+              {t.heroTitlePre}
+              <span className="text-teal">{t.heroTitleHighlight}</span>
+              {t.heroTitlePost}
+            </h1>
+            <p className="text-sage text-lg md:text-xl max-w-[44ch] mt-7 mb-9 leading-relaxed">{t.heroLede}</p>
+            <div className="flex flex-wrap gap-3">
+              <Link href="/patient/login" className={btnTeal}>
+                {t.heroCtaRecords}
+              </Link>
+              <Link href="/doctor/login" className={btnLine}>
+                {t.heroCtaDoctor}
+              </Link>
+            </div>
+            <p className="text-sage text-[15px] mt-6">
+              {t.quietNew}{" "}
+              <Link href="/book" className="text-teal font-semibold hover:underline">
+                {t.bookLink}
+              </Link>
+            </p>
+          </div>
 
-        <div className="mt-8 flex flex-wrap gap-2">
-          <Badge tone="teal">{t.badge1}</Badge>
-          <Badge tone="sage">{t.badge2}</Badge>
-          <Badge tone="sage">{t.badge3}</Badge>
-        </div>
-
-        <div className="mt-8 flex flex-wrap items-start gap-3">
-          <Link
-            href="/book"
-            className="inline-flex items-center gap-2 rounded-full bg-teal px-6 py-3 text-sm font-semibold text-white hover:bg-teal-dark transition-colors"
-          >
-            {t.bookCta}
-          </Link>
-          <Link
-            href="/emergency/scan"
-            className="inline-flex items-center gap-2 rounded-full bg-alert px-6 py-3 text-sm font-semibold text-white hover:bg-alert/90 transition-colors"
-          >
-            {t.scanCta}
-          </Link>
-        </div>
-        <p className="mt-3 text-xs text-sage max-w-xl leading-relaxed">{t.bookCtaSub}</p>
-        <p className="mt-1 text-xs text-sage">{t.scanCtaSub}</p>
-      </section>
-
-      {/* ---------- Two systems, one record ---------- */}
-      <section className="px-6 md:px-10 max-w-5xl mx-auto w-full pb-16">
-        <div className="eyebrow text-sage mb-3">{t.twoSystemsEyebrow}</div>
-        <h2 className="font-display text-2xl md:text-3xl mb-8 max-w-2xl">{t.twoSystemsTitle}</h2>
-
-        <div className="grid sm:grid-cols-2 gap-5">
-          <Link href="/doctor/login" className="block">
-            <Card className="h-full hover:border-teal transition-colors group cursor-pointer overflow-hidden">
-              <div className="h-1.5 bg-teal" />
-              <div className="p-6">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="inline-flex items-center rounded-full bg-teal-light px-2.5 py-1 text-[10px] font-semibold tracking-wide uppercase text-teal-dark">
-                    {t.doctorPortalTag}
-                  </span>
-                </div>
-                <h3 className="font-display text-2xl mt-2">{t.doctorPortalTitle}</h3>
-                <p className="text-sm text-sage mt-2 leading-relaxed">{t.doctorPortalBody}</p>
-                <ul className="mt-4 space-y-1.5 text-sm text-sage">
-                  {t.doctorPortalList.map((item) => (
-                    <li key={item}>
-                      {bulletPrefix}
-                      {item}
-                      {bulletSuffix}
-                    </li>
-                  ))}
-                </ul>
-                <span className="mt-5 inline-block text-sm font-semibold text-teal-dark group-hover:translate-x-1 transition-transform">
-                  {t.doctorPortalCta}
-                </span>
+          {/* Illustrative stage: a CNIC-style card + the responder's phone view */}
+          <div className="relative h-[470px] hidden sm:block" aria-hidden="true">
+            <div className="absolute start-0 top-8 w-[380px] max-w-[94%] aspect-[1.586] rounded-[20px] p-6 text-white bg-[linear-gradient(135deg,#0E7C7B,#0A5F5E)] shadow-[0_40px_70px_-30px_rgba(10,95,94,0.7)] -rotate-3 flex flex-col justify-between">
+              <div className="flex justify-between text-xs font-medium opacity-80">
+                <span>{t.stageCardTop1}</span>
+                <span>{t.stageCardTop2}</span>
               </div>
-            </Card>
-          </Link>
-
-          <Link href="/patient/login" className="block">
-            <Card className="h-full hover:border-ink transition-colors group cursor-pointer overflow-hidden">
-              <div className="h-1.5 bg-ink" />
-              <div className="p-6">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="inline-flex items-center rounded-full bg-line px-2.5 py-1 text-[10px] font-semibold tracking-wide uppercase text-ink">
-                    {t.patientPortalTag}
-                  </span>
-                </div>
-                <h3 className="font-display text-2xl mt-2">{t.patientPortalTitle}</h3>
-                <p className="text-sm text-sage mt-2 leading-relaxed">{t.patientPortalBody}</p>
-                <ul className="mt-4 space-y-1.5 text-sm text-sage">
-                  {t.patientPortalList.map((item) => (
-                    <li key={item}>
-                      {bulletPrefix}
-                      {item}
-                      {bulletSuffix}
-                    </li>
-                  ))}
-                </ul>
-                <span className="mt-5 inline-block text-sm font-semibold text-ink group-hover:translate-x-1 transition-transform">
-                  {t.patientPortalCta}
-                </span>
+              <div>
+                <div className="w-[42px] h-[32px] rounded-lg bg-[linear-gradient(135deg,#E9D9A6,#BFA45F)] mt-3.5 mb-2.5" />
+                <div className="font-display text-2xl font-medium">{t.stageCardName}</div>
+                <div className="text-[15px] tracking-widest opacity-90 tabular-nums">{t.stageCardNid}</div>
               </div>
-            </Card>
-          </Link>
+              <div className="flex justify-between items-end">
+                <span className="text-xs opacity-60">{t.stageLinked}</span>
+                <div className="relative w-[88px] h-[88px] bg-white rounded-[10px] p-2">
+                  {/* corner brackets */}
+                  <span className="absolute -top-2 -start-2 w-5 h-5 border-s-[3px] border-t-[3px] border-alert" />
+                  <span className="absolute -bottom-2 -end-2 w-5 h-5 border-e-[3px] border-b-[3px] border-alert" />
+                  <div className="relative overflow-hidden h-full">
+                    <QrPattern />
+                    <div className="scanline absolute inset-x-0 h-[2px] bg-alert shadow-[0_0_8px_#D64550]" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="absolute end-0 bottom-0 w-[248px] bg-white border border-line rounded-[28px] p-5 shadow-[0_40px_80px_-30px_rgba(11,32,39,0.55)]">
+              <div className="flex items-center gap-2 text-[13px] font-semibold text-alert">
+                <span className="w-2 h-2 rounded-full bg-alert" />
+                {t.emergencyView}
+              </div>
+              <div className="font-display text-6xl leading-none text-alert mt-3">{t.bloodValue}</div>
+              <small className="text-sage text-[13px]">{t.bloodLabel}</small>
+              <dl className="mt-3 text-sm leading-snug">
+                <dt className="text-sage mt-3 text-[13px]">{t.allergiesLabel}</dt>
+                <dd className="font-semibold">{t.allergiesValue}</dd>
+                <dt className="text-sage mt-3 text-[13px]">{t.conditionsLabel}</dt>
+                <dd className="font-semibold">{t.conditionsValue}</dd>
+                <dt className="text-sage mt-3 text-[13px]">{t.contactLabel}</dt>
+                <dd className="font-semibold">{t.contactValue}</dd>
+              </dl>
+              <div className="mt-4 pt-3.5 border-t border-line text-[13px] text-sage flex items-center gap-2">
+                <I d={ICONS.lock} className="w-[18px] h-[18px]" />
+                {t.privacyLine}
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      {/* ---------- How it works ---------- */}
-      <section className="px-6 md:px-10 max-w-5xl mx-auto w-full pb-16">
-        <div className="eyebrow text-sage mb-3">{t.howItWorksEyebrow}</div>
-        <div className="grid sm:grid-cols-3 gap-5">
-          {t.steps.map((s) => (
-            <Card key={s.step} className="p-6">
-              <div className="font-mono text-xs text-teal mb-3">{s.step}</div>
-              <h3 className="font-display text-lg mb-2">{s.title}</h3>
-              <p className="text-sm text-sage leading-relaxed">{s.body}</p>
-            </Card>
+      {/* ---------- Trust strip ---------- */}
+      <section className="max-w-6xl mx-auto px-6 md:px-10">
+        <div className="grid grid-cols-2 lg:grid-cols-4 border-y border-line">
+          {[
+            { icon: ICONS.log, label: t.trust1, cls: "" },
+            { icon: ICONS.users, label: t.trust2, cls: "border-s border-line" },
+            { icon: ICONS.clock, label: t.trust3, cls: "lg:border-s border-line max-lg:border-t max-lg:border-line" },
+            { icon: ICONS.shield, label: t.trust4, cls: "border-s border-line max-lg:border-t max-lg:border-line" },
+          ].map((item, i) => (
+            <div key={i} className={`flex items-center gap-3.5 px-5 py-6 font-medium text-[15px] leading-snug ${item.cls}`}>
+              <I d={item.icon} className="w-[26px] h-[26px] text-teal shrink-0" />
+              {item.label}
+            </div>
           ))}
         </div>
       </section>
 
-      {/* ---------- Security ---------- */}
-      <section className="px-6 md:px-10 max-w-5xl mx-auto w-full pb-20">
-        <Card className="p-8 !bg-ink !border-ink text-white">
-          <div className="eyebrow text-white/60 mb-3">{t.securityEyebrow}</div>
-          <h2 className="font-display text-2xl md:text-3xl mb-6 max-w-2xl">{t.securityTitle}</h2>
-          <div className="grid sm:grid-cols-2 gap-4 text-sm text-white/80">
-            {t.securityList.map((item) => (
-              <div key={item}>
-                {bulletPrefix}
-                {item}
-                {bulletSuffix}
+      {/* ---------- Responder ledger ---------- */}
+      <section className="max-w-6xl mx-auto px-6 md:px-10 py-20 md:py-28">
+        <div className="grid lg:grid-cols-[0.85fr_1.15fr] gap-10 lg:gap-20 items-center">
+          <div>
+            <h2 className="font-display text-[clamp(30px,4vw,52px)] leading-[1.08] tracking-tight">{t.responderTitle}</h2>
+            <p className="text-sage text-lg md:text-xl mt-5 max-w-[40ch] leading-relaxed">{t.responderBody}</p>
+          </div>
+          <div className="bg-white border border-line rounded-3xl px-7 md:px-9 pb-6 pt-1 shadow-[0_30px_60px_-40px_rgba(11,32,39,0.35)]">
+            <div className="flex justify-between py-4 border-b border-line font-semibold">
+              <span>{t.stageCardName}</span>
+              <span className="text-sage font-medium tabular-nums">{t.ledgerNid}</span>
+            </div>
+            {[
+              { label: t.allowedBlood, value: t.bloodValue, big: true },
+              { label: t.allowedAllergies, value: t.allergiesValue },
+              { label: t.allowedConditions, value: t.conditionsValue },
+              { label: t.allowedContacts, value: t.contactsValue },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center justify-between gap-4 py-4 border-b border-line">
+                <span className="text-sage text-[15px]">{row.label}</span>
+                <b className={`font-semibold ${row.big ? "font-display text-[26px] text-alert" : ""}`}>{row.value}</b>
+              </div>
+            ))}
+            <div className="relative my-5 border-t-2 border-dashed border-alert text-center">
+              <span className="relative -top-[15px] inline-flex items-center gap-2 bg-white px-3.5 text-alert font-semibold text-sm">
+                <I d={ICONS.scan} className="w-[18px] h-[18px]" />
+                {t.stopLabel}
+              </span>
+            </div>
+            {[
+              { label: t.lockedDiagnoses, w: 55 },
+              { label: t.lockedPrescriptions, w: 70 },
+              { label: t.lockedVisits, w: 45 },
+              { label: t.lockedReports, w: 60 },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center justify-between gap-4 py-3.5 border-b border-line last:border-b-0">
+                <span className="text-sage text-[15px]">{row.label}</span>
+                <span className="flex items-center gap-3 flex-1 justify-end">
+                  <i
+                    className="h-2.5 rounded-full max-w-[60%] flex-none w-full"
+                    style={{
+                      maxWidth: `${row.w}%`,
+                      background: "repeating-linear-gradient(90deg,#DCE4E3 0 8px,transparent 8px 11px)",
+                    }}
+                  />
+                  <I d={ICONS.lock} className="w-[18px] h-[18px] text-sage shrink-0" />
+                </span>
               </div>
             ))}
           </div>
-        </Card>
+        </div>
       </section>
 
-      <footer className="px-6 md:px-10 pb-12 max-w-5xl mx-auto w-full">
-        <p className="text-xs text-sage max-w-xl">{t.footer}</p>
+      {/* ---------- Portals ---------- */}
+      <section className="max-w-6xl mx-auto px-6 md:px-10 pb-20 md:pb-28">
+        <div className="grid md:grid-cols-2 gap-6">
+          <div className="rounded-[28px] p-8 md:p-12 flex flex-col gap-5 min-h-[340px] bg-paper border border-line shadow-[0_40px_70px_-55px_rgba(10,60,56,0.5)]">
+            <div className="w-[52px] h-[52px] rounded-2xl grid place-items-center border-[1.5px] border-current text-ink opacity-90">
+              <I d={ICONS.cross} />
+            </div>
+            <h3 className="font-display text-[clamp(26px,3vw,38px)] leading-[1.1]">{t.portalDoctorTitle}</h3>
+            <p className="text-[17px] max-w-[38ch] flex-1 opacity-80 leading-relaxed">{t.portalDoctorBody}</p>
+            <Link href="/doctor/login" className={`${btnTeal} self-start`}>
+              {t.portalDoctorCta}
+            </Link>
+          </div>
+          <div className="rounded-[28px] p-8 md:p-12 flex flex-col gap-5 min-h-[340px] bg-teal-light border border-line shadow-[0_40px_70px_-55px_rgba(10,60,56,0.5)]">
+            <div className="w-[52px] h-[52px] rounded-2xl grid place-items-center border-[1.5px] border-current text-teal-dark opacity-90">
+              <I d={ICONS.user} />
+            </div>
+            <h3 className="font-display text-[clamp(26px,3vw,38px)] leading-[1.1]">{t.portalPatientTitle}</h3>
+            <p className="text-[17px] max-w-[38ch] flex-1 opacity-80 leading-relaxed">{t.portalPatientBody}</p>
+            <Link href="/patient/login" className={`${btnTeal} self-start`}>
+              {t.portalPatientCta}
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ---------- Steps ---------- */}
+      <section className="max-w-6xl mx-auto px-6 md:px-10 pb-20 md:pb-28">
+        <h2 className="font-display text-[clamp(30px,4vw,52px)] leading-[1.08] tracking-tight mb-14 max-w-[24ch]">
+          {t.stepsTitle}
+        </h2>
+        <div className="grid md:grid-cols-3 gap-10 relative">
+          <div className="hidden md:block absolute top-7 inset-x-0 border-t-[1.5px] border-line" aria-hidden="true" />
+          {[
+            { n: 1, title: t.step1Title, body: t.step1Body },
+            { n: 2, title: t.step2Title, body: t.step2Body },
+            { n: 3, title: t.step3Title, body: t.step3Body },
+          ].map((s) => (
+            <div key={s.n} className="relative">
+              <i className="relative grid place-items-center w-14 h-14 rounded-full bg-paper border-[1.5px] border-teal text-teal font-display text-2xl not-italic">
+                {s.n}
+              </i>
+              <h3 className="font-display text-[26px] mt-6 mb-2.5 leading-tight">{s.title}</h3>
+              <p className="text-sage leading-relaxed max-w-[36ch]">{s.body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ---------- Security panel ---------- */}
+      <section className="max-w-6xl mx-auto px-6 md:px-10 pb-20 md:pb-28">
+        <div className="bg-paper border border-line rounded-[32px] p-8 md:p-[72px]">
+          <h2 className="font-display text-[clamp(30px,4vw,52px)] leading-[1.06] tracking-tight max-w-[18ch]">
+            {t.securityTitle}
+          </h2>
+          <div className="grid md:grid-cols-2 gap-x-16 mt-14">
+            {[
+              { icon: ICONS.users, title: t.security1Title, body: t.security1Body },
+              { icon: ICONS.log, title: t.security2Title, body: t.security2Body },
+              { icon: ICONS.clock, title: t.security3Title, body: t.security3Body },
+              { icon: ICONS.shield, title: t.security4Title, body: t.security4Body },
+            ].map((item) => (
+              <div key={item.title} className="border-t border-line py-7 pb-9">
+                <I d={item.icon} className="text-teal mb-4" />
+                <h3 className="font-semibold text-lg text-ink mb-2">{item.title}</h3>
+                <p className="text-sage text-[16px] leading-relaxed max-w-[42ch]">{item.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ---------- Footer ---------- */}
+      <footer className="max-w-6xl mx-auto px-6 md:px-10 pb-24 md:pb-16 text-sage text-[15px]">
+        <div className="flex flex-wrap gap-5 md:gap-10 items-center justify-between">
+          <span>{t.footerLine}</span>
+          <details className="border border-line rounded-xl px-4 py-2 text-sm bg-white">
+            <summary className="cursor-pointer font-semibold text-ink">{t.footerDemoLabel}</summary>
+            <p className="mt-2 font-mono text-xs leading-relaxed">{t.footerDemoBody}</p>
+          </details>
+        </div>
       </footer>
+
+      {/* Sticky mobile emergency scan — a responder or bystander on a phone
+          should never have to hunt for the one action that needs no login. */}
+      <Link
+        href="/emergency/scan"
+        className={`sm:hidden fixed inset-x-4 bottom-[calc(14px+env(safe-area-inset-bottom,0px))] z-40 justify-center ${btnAlertSm} shadow-[0_12px_30px_rgba(214,69,80,0.5)]`}
+      >
+        <I d={ICONS.scan} className="w-5 h-5" />
+        {t.navEmergency}
+      </Link>
     </main>
   );
 }
