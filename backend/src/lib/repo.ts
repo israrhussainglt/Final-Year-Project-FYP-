@@ -30,6 +30,9 @@ import type {
   RegistrationAttachment,
   RegistrationStatus,
   BloodGroup,
+  Medication,
+  RagChunk,
+  Notification,
 } from "./types";
 
 // ---------- Doctors ----------
@@ -37,7 +40,8 @@ import type {
 // Doctor login only ever succeeds for an active doctor — a hospital admin
 // deactivating a doctor (see deactivateDoctor below) takes effect
 // immediately, without deleting any of that doctor's historical records,
-// appointments, or prescriptions (which stay intact for patients/analytics).
+// appointments, or prescriptions (which stay intact so patients keep their
+// history).
 export function findDoctorByEmail(email: string): Doctor | undefined {
   const db = getDb();
   return db.prepare("SELECT * FROM doctors WHERE email = ? AND is_active = 1").get(email) as Doctor | undefined;
@@ -58,11 +62,22 @@ export function findDoctorById(id: string): Doctor | undefined {
   return db.prepare("SELECT * FROM doctors WHERE id = ?").get(id) as Doctor | undefined;
 }
 
+// Patient-facing lookups (the public booking form, patient appointment
+// requests, waitlist joins) must only ever match an *active* doctor — a
+// deactivated doctor can't log in to review what was addressed to them, so
+// accepting their id would create a request nobody can ever act on. The
+// hospital-admin doctor-management routes deliberately use findDoctorById
+// instead, since deactivating/reactivating has to work on inactive rows.
+export function findActiveDoctorById(id: string): Doctor | undefined {
+  const db = getDb();
+  return db.prepare("SELECT * FROM doctors WHERE id = ? AND is_active = 1").get(id) as Doctor | undefined;
+}
+
 // ---------- Hospital admins ----------
 //
 // Same auth pattern as doctors (password hash checked with bcrypt by the
-// caller, JWT session minted by lib/auth.ts) — hospital-admin is a peer of
-// doctor auth, not a variant of the analytics-analyst pattern.
+// caller, JWT session minted by lib/auth.ts) — a separate session/role from
+// doctors and patients, never interchangeable with either.
 
 export function findHospitalAdminByEmail(email: string): HospitalAdmin | undefined {
   const db = getDb();
@@ -126,13 +141,8 @@ export function licenseNumberExists(licenseNumber: string): boolean {
   return Boolean(db.prepare("SELECT 1 FROM doctors WHERE license_number = ?").get(licenseNumber));
 }
 
-// Own-hospital dashboard stats for a hospital admin. Unlike getHospitalSummary
-// (below, used by the separate analyst-facing analytics service), these
-// numbers are never suppressed for k-anonymity — that suppression exists to
-// stop one analyst from de-anonymizing a small population at *another*
-// hospital by cross-referencing regions; an admin looking at their own
-// hospital's own real numbers isn't that threat model, so this returns exact
-// counts. Patient records aren't siloed per hospital (see the comment above
+// Own-hospital dashboard stats for a hospital admin. Patient records aren't
+// siloed per hospital (see the comment above
 // the hospital-admin patient routes in server.ts), so "this hospital's
 // patients" is defined the only way that's meaningful here: patients this
 // hospital's doctors have actually recorded a visit for.
@@ -954,8 +964,7 @@ export function listAppointmentsForHospital(
 // Aggregate-only figures for the AI insights endpoint below: counts by
 // status and by doctor, plus how long the oldest unconfirmed request has
 // been waiting. Deliberately returns nothing patient-identifying — no
-// names, no reasons — so this is safe to hand to an LLM prompt the same
-// way analytics' aggregate-only queries are.
+// names, no reasons — so this is safe to hand to an LLM prompt.
 export function getHospitalAppointmentLoadSummary(hospitalId: string): {
   byStatus: Record<AppointmentStatus, number>;
   byDoctor: { doctorName: string; requested: number; confirmed: number }[];
@@ -1011,7 +1020,7 @@ export function getHospitalAppointmentLoadSummary(hospitalId: string): {
 // window — completion rate, cancellation rate, and visit volume — so the
 // hospital-admin AI briefing can speak to *staffing balance*, not just raw
 // today's-queue counts (getHospitalAppointmentLoadSummary above). Same
-// no-patient-identifying-data boundary as every other analytics query here.
+// no-patient-identifying-data boundary as that function.
 export function getDoctorWorkloadBalance(
   hospitalId: string,
   lookbackDays = 30
@@ -1351,639 +1360,6 @@ export function offerWaitlistSlot(waitlistId: string, scheduledAtIso: string): A
   create();
 
   return findAppointmentById(appointmentId)!;
-}
-
-// ---------------------------------------------------------------------------
-// Analytics — national/regional aggregates for the analytics service.
-//
-// Everything below returns COUNTS ONLY, grouped by region and/or diagnosis
-// and/or time bucket. Nothing here ever returns a patient name, National ID,
-// address, or any other identifier — that's what keeps this safe to expose
-// to a "which region has how many cases" dashboard instead of a clinical
-// record viewer.
-//
-// Region is derived from the *hospital the visit happened at* (via the
-// recording doctor's hospital_id), not the patient's home address — that's
-// the more epidemiologically useful signal (where a case was diagnosed) and
-// it's also data the hospital already owns, rather than a patient's home
-// address which nothing here needs to touch.
-//
-// Small-cell suppression: any count below MIN_CELL_SIZE is never returned as
-// an exact number. This is standard public-health-statistics practice (the
-// same principle the CDC/WHO use) — it stops someone from combining a tight
-// region + a rare diagnosis to re-identify a specific patient.
-// ---------------------------------------------------------------------------
-
-export const MIN_CELL_SIZE = 5;
-
-export type SuppressibleCount = { count: number | null; suppressed: boolean };
-
-function suppress(rawCount: number): SuppressibleCount {
-  return rawCount < MIN_CELL_SIZE ? { count: null, suppressed: true } : { count: rawCount, suppressed: false };
-}
-
-// Free-text diagnoses get bucketed by a trimmed/lowercased key so "Dengue",
-// "dengue ", and "DENGUE" all roll up into one count, while what's shown to
-// the analyst is the most common original casing for that bucket.
-function diagnosisKeyExpr(column: string): string {
-  return `LOWER(TRIM(${column}))`;
-}
-
-export type AnalyticsOverview = {
-  totalPatients: number;
-  totalVisits: number;
-  totalHospitals: number;
-  totalDoctors: number;
-  activeRegions: number;
-  activeProvinces: number;
-  earliestVisit: string | null;
-  latestVisit: string | null;
-};
-
-export function getAnalyticsOverview(): AnalyticsOverview {
-  const db = getDb();
-  const totalPatients = (db.prepare("SELECT COUNT(*) AS n FROM patients").get() as { n: number }).n;
-  const totalVisits = (db.prepare("SELECT COUNT(*) AS n FROM medical_records").get() as { n: number }).n;
-  const totalHospitals = (db.prepare("SELECT COUNT(*) AS n FROM hospitals").get() as { n: number }).n;
-  const totalDoctors = (db.prepare("SELECT COUNT(*) AS n FROM doctors").get() as { n: number }).n;
-  const activeRegions = (
-    db
-      .prepare(
-        `SELECT COUNT(DISTINCT h.city) AS n
-         FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         JOIN hospitals h ON h.id = d.hospital_id
-         WHERE h.city IS NOT NULL AND h.city != ''`
-      )
-      .get() as { n: number }
-  ).n;
-  const activeProvinces = (
-    db
-      .prepare(
-        `SELECT COUNT(DISTINCT h.province) AS n
-         FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         JOIN hospitals h ON h.id = d.hospital_id
-         WHERE h.province IS NOT NULL AND h.province != ''`
-      )
-      .get() as { n: number }
-  ).n;
-  const range = db
-    .prepare("SELECT MIN(visit_date) AS earliest, MAX(visit_date) AS latest FROM medical_records")
-    .get() as { earliest: string | null; latest: string | null };
-  return {
-    totalPatients,
-    totalVisits,
-    totalHospitals,
-    totalDoctors,
-    activeRegions,
-    activeProvinces,
-    earliestVisit: range.earliest,
-    latestVisit: range.latest,
-  };
-}
-
-export type RegionSummaryRow = {
-  region: string;
-  province: string;
-  visitCount: SuppressibleCount;
-  patientCount: SuppressibleCount;
-  topCondition: string | null;
-};
-
-// One row per region (hospital city), with total visit volume, distinct
-// patients seen, and that region's single most common diagnosis. Regions
-// with no city on file are grouped under "Unspecified" rather than dropped.
-// Each row also carries its province (from hospitals.province, backfilled
-// from city where possible) so the UI can group/filter city rows by
-// province without a second round trip.
-export function getRegionSummary(): RegionSummaryRow[] {
-  const db = getDb();
-  const regions = db
-    .prepare(
-      `SELECT COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') AS region,
-              COALESCE(NULLIF(TRIM(h.province), ''), 'Unspecified') AS province,
-              COUNT(*) AS visit_count,
-              COUNT(DISTINCT m.patient_id) AS patient_count
-       FROM medical_records m
-       JOIN doctors d ON d.id = m.doctor_id
-       LEFT JOIN hospitals h ON h.id = d.hospital_id
-       GROUP BY region, province
-       ORDER BY visit_count DESC`
-    )
-    .all() as { region: string; province: string; visit_count: number; patient_count: number }[];
-
-  return regions.map((r) => {
-    const top = db
-      .prepare(
-        `SELECT m.diagnosis AS diagnosis, COUNT(*) AS n
-         FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         LEFT JOIN hospitals h ON h.id = d.hospital_id
-         WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-           AND m.diagnosis IS NOT NULL AND TRIM(m.diagnosis) != ''
-         GROUP BY ${diagnosisKeyExpr("m.diagnosis")}
-         ORDER BY n DESC
-         LIMIT 1`
-      )
-      .get(r.region) as { diagnosis: string; n: number } | undefined;
-
-    return {
-      region: r.region,
-      province: r.province,
-      visitCount: suppress(r.visit_count),
-      patientCount: suppress(r.patient_count),
-      topCondition: top && top.n >= MIN_CELL_SIZE ? top.diagnosis : null,
-    };
-  });
-}
-
-export type ProvinceSummaryRow = {
-  province: string;
-  regionCount: number;
-  visitCount: SuppressibleCount;
-  patientCount: SuppressibleCount;
-  topCondition: string | null;
-};
-
-// One row per province (Punjab, Sindh, KP, Balochistan, Gilgit-Baltistan,
-// AJK, ICT), rolling up every hospital city within it. This is the primary
-// grouping for the province-level analytics view; getRegionSummary above
-// stays available for city-level drill-down.
-export function getProvinceSummary(): ProvinceSummaryRow[] {
-  const db = getDb();
-  const provinces = db
-    .prepare(
-      `SELECT COALESCE(NULLIF(TRIM(h.province), ''), 'Unspecified') AS province,
-              COUNT(DISTINCT COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified')) AS region_count,
-              COUNT(*) AS visit_count,
-              COUNT(DISTINCT m.patient_id) AS patient_count
-       FROM medical_records m
-       JOIN doctors d ON d.id = m.doctor_id
-       LEFT JOIN hospitals h ON h.id = d.hospital_id
-       GROUP BY province
-       ORDER BY visit_count DESC`
-    )
-    .all() as { province: string; region_count: number; visit_count: number; patient_count: number }[];
-
-  return provinces.map((p) => {
-    const top = db
-      .prepare(
-        `SELECT m.diagnosis AS diagnosis, COUNT(*) AS n
-         FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         LEFT JOIN hospitals h ON h.id = d.hospital_id
-         WHERE COALESCE(NULLIF(TRIM(h.province), ''), 'Unspecified') = ?
-           AND m.diagnosis IS NOT NULL AND TRIM(m.diagnosis) != ''
-         GROUP BY ${diagnosisKeyExpr("m.diagnosis")}
-         ORDER BY n DESC
-         LIMIT 1`
-      )
-      .get(p.province) as { diagnosis: string; n: number } | undefined;
-
-    return {
-      province: p.province,
-      regionCount: p.region_count,
-      visitCount: suppress(p.visit_count),
-      patientCount: suppress(p.patient_count),
-      topCondition: top && top.n >= MIN_CELL_SIZE ? top.diagnosis : null,
-    };
-  });
-}
-
-export type HospitalSummaryRow = {
-  hospitalId: string;
-  hospitalName: string;
-  region: string;
-  province: string;
-  doctorCount: number;
-  visitCount: SuppressibleCount;
-  patientCount: SuppressibleCount;
-};
-
-// Hospital-level drill-down under each region: every hospital on file
-// (including ones with zero visits — LEFT JOINed in, not filtered out),
-// its region/province, how many doctors it has, and its visit/patient
-// counts. This is what completes the region -> hospital -> doctor chain
-// for analytics, on top of the region/province rollups above which only
-// went as far as region. A region with zero hospitals simply yields no
-// rows here (an empty array, handled defensively by callers rather than
-// crashing), and a hospital with zero visits still gets a row — COUNT(m.id)
-// over a LEFT JOIN with no matching medical_records rows is exactly 0,
-// which suppress() below renders the same way it renders any other small
-// cell (frontend shows "<5"), never a divide-by-zero or crash.
-export function getHospitalSummary(region?: string): HospitalSummaryRow[] {
-  const db = getDb();
-  const rows = (
-    region
-      ? db
-          .prepare(
-            `SELECT h.id AS hospital_id, h.name AS hospital_name,
-                    COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') AS region,
-                    COALESCE(NULLIF(TRIM(h.province), ''), 'Unspecified') AS province,
-                    (SELECT COUNT(*) FROM doctors dd WHERE dd.hospital_id = h.id) AS doctor_count,
-                    COUNT(m.id) AS visit_count,
-                    COUNT(DISTINCT m.patient_id) AS patient_count
-             FROM hospitals h
-             LEFT JOIN doctors d ON d.hospital_id = h.id
-             LEFT JOIN medical_records m ON m.doctor_id = d.id
-             WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-             GROUP BY h.id
-             ORDER BY visit_count DESC, h.name ASC`
-          )
-          .all(region)
-      : db
-          .prepare(
-            `SELECT h.id AS hospital_id, h.name AS hospital_name,
-                    COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') AS region,
-                    COALESCE(NULLIF(TRIM(h.province), ''), 'Unspecified') AS province,
-                    (SELECT COUNT(*) FROM doctors dd WHERE dd.hospital_id = h.id) AS doctor_count,
-                    COUNT(m.id) AS visit_count,
-                    COUNT(DISTINCT m.patient_id) AS patient_count
-             FROM hospitals h
-             LEFT JOIN doctors d ON d.hospital_id = h.id
-             LEFT JOIN medical_records m ON m.doctor_id = d.id
-             GROUP BY h.id
-             ORDER BY region ASC, visit_count DESC, h.name ASC`
-          )
-          .all()
-  ) as {
-    hospital_id: string;
-    hospital_name: string;
-    region: string;
-    province: string;
-    doctor_count: number;
-    visit_count: number;
-    patient_count: number;
-  }[];
-
-  return rows.map((r) => ({
-    hospitalId: r.hospital_id,
-    hospitalName: r.hospital_name,
-    region: r.region,
-    province: r.province,
-    doctorCount: r.doctor_count,
-    visitCount: suppress(r.visit_count),
-    patientCount: suppress(r.patient_count),
-  }));
-}
-
-export type ConditionCountRow = { diagnosis: string; count: SuppressibleCount };
-
-// Nationwide (or single-region, if `region` is passed) leaderboard of the
-// most common diagnoses, most-common first, capped at `limit` rows.
-export function getTopConditions(limit = 10, region?: string): ConditionCountRow[] {
-  const db = getDb();
-  const rows = region
-    ? (db
-        .prepare(
-          `SELECT m.diagnosis AS diagnosis, COUNT(*) AS n
-           FROM medical_records m
-           JOIN doctors d ON d.id = m.doctor_id
-           LEFT JOIN hospitals h ON h.id = d.hospital_id
-           WHERE m.diagnosis IS NOT NULL AND TRIM(m.diagnosis) != ''
-             AND COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-           GROUP BY ${diagnosisKeyExpr("m.diagnosis")}
-           ORDER BY n DESC
-           LIMIT ?`
-        )
-        .all(region, limit) as { diagnosis: string; n: number }[])
-    : (db
-        .prepare(
-          `SELECT diagnosis AS diagnosis, COUNT(*) AS n
-           FROM medical_records
-           WHERE diagnosis IS NOT NULL AND TRIM(diagnosis) != ''
-           GROUP BY ${diagnosisKeyExpr("diagnosis")}
-           ORDER BY n DESC
-           LIMIT ?`
-        )
-        .all(limit) as { diagnosis: string; n: number }[]);
-
-  return rows.map((r) => ({ diagnosis: r.diagnosis, count: suppress(r.n) }));
-}
-
-export type TrendPoint = { bucket: string; count: SuppressibleCount };
-
-// Case counts for a single diagnosis (substring, case-insensitive match, so
-// "dengue" also catches "Dengue Fever") over time, bucketed by week or
-// month, optionally scoped to one region. Buckets with zero rows for the
-// diagnosis simply don't appear — the frontend fills gaps as 0 (not
-// suppressed, since 0 can't identify anyone).
-export function getConditionTrend(
-  diagnosis: string,
-  opts: { region?: string; interval?: "week" | "month" } = {}
-): TrendPoint[] {
-  const db = getDb();
-  const interval = opts.interval ?? "week";
-  const bucketExpr =
-    interval === "month" ? "strftime('%Y-%m', m.visit_date)" : "strftime('%Y-W%W', m.visit_date)";
-
-  const like = `%${diagnosis.trim().toLowerCase()}%`;
-  const rows = (
-    opts.region
-      ? db
-          .prepare(
-            `SELECT ${bucketExpr} AS bucket, COUNT(*) AS n
-             FROM medical_records m
-             JOIN doctors d ON d.id = m.doctor_id
-             LEFT JOIN hospitals h ON h.id = d.hospital_id
-             WHERE LOWER(m.diagnosis) LIKE ?
-               AND COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-             GROUP BY bucket
-             ORDER BY bucket ASC`
-          )
-          .all(like, opts.region)
-      : db
-          .prepare(
-            `SELECT ${bucketExpr} AS bucket, COUNT(*) AS n
-             FROM medical_records m
-             WHERE LOWER(m.diagnosis) LIKE ?
-             GROUP BY bucket
-             ORDER BY bucket ASC`
-          )
-          .all(like)
-  ) as { bucket: string; n: number }[];
-
-  return rows.map((r) => ({ bucket: r.bucket, count: suppress(r.n) }));
-}
-
-export type RegionConditionCell = { region: string; diagnosis: string; count: SuppressibleCount };
-
-// Region x top-N-conditions grid, for a heatmap-style view. Computes the
-// nationwide top N diagnoses first, then counts each of those within every
-// region — so the columns are consistent across every row.
-export function getRegionConditionMatrix(topN = 6): { regions: string[]; diagnoses: string[]; cells: RegionConditionCell[] } {
-  const db = getDb();
-  const topDiagnoses = getTopConditions(topN).map((c) => c.diagnosis);
-  const regionRows = db
-    .prepare(
-      `SELECT DISTINCT COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') AS region
-       FROM medical_records m
-       JOIN doctors d ON d.id = m.doctor_id
-       LEFT JOIN hospitals h ON h.id = d.hospital_id`
-    )
-    .all() as { region: string }[];
-  const regions = regionRows.map((r) => r.region).sort();
-
-  const cells: RegionConditionCell[] = [];
-  for (const region of regions) {
-    for (const diagnosis of topDiagnoses) {
-      const row = db
-        .prepare(
-          `SELECT COUNT(*) AS n
-           FROM medical_records m
-           JOIN doctors d ON d.id = m.doctor_id
-           LEFT JOIN hospitals h ON h.id = d.hospital_id
-           WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-             AND ${diagnosisKeyExpr("m.diagnosis")} = ${diagnosisKeyExpr("?")}`
-        )
-        .get(region, diagnosis) as { n: number };
-      cells.push({ region, diagnosis, count: suppress(row.n) });
-    }
-  }
-
-  return { regions, diagnoses: topDiagnoses, cells };
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2 analytics — anomaly detection, benchmarking, forecasting, and a
-// data-quality check. Same rules as everything above: counts and rates
-// only, small-cell suppressed, nothing that can be traced to one person.
-// ---------------------------------------------------------------------------
-
-export type OutbreakAlert = {
-  region: string;
-  diagnosis: string;
-  latestCount: number;
-  baselineAverage: number;
-  ratio: number;
-  severity: "watch" | "elevated" | "high";
-};
-
-// Compares each region's most recent week of cases for its top conditions
-// against the average of the preceding weeks. Anything at least 2x baseline
-// (and with enough raw volume to be meaningful, not just noise) is flagged.
-// This is intentionally a simple, explainable ratio rather than a fitted
-// statistical model — an analyst should be able to see exactly why a row is
-// on this list.
-export function getOutbreakAlerts(opts: { lookbackWeeks?: number; minLatestCount?: number } = {}): OutbreakAlert[] {
-  const lookbackWeeks = opts.lookbackWeeks ?? 6;
-  const minLatestCount = opts.minLatestCount ?? MIN_CELL_SIZE;
-
-  const regions = getRegionSummary().map((r) => r.region);
-  const alerts: OutbreakAlert[] = [];
-
-  for (const region of regions) {
-    const conditions = getTopConditions(5, region);
-    for (const c of conditions) {
-      const trend = getConditionTrend(c.diagnosis, { region, interval: "week" });
-      if (trend.length < 3) continue;
-      const recent = trend.slice(-lookbackWeeks);
-      const latest = recent[recent.length - 1];
-      const baseline = recent.slice(0, -1);
-      if (latest.count.suppressed || baseline.length === 0) continue;
-
-      const baselineValues = baseline.map((b) => b.count.count ?? 0);
-      const baselineAverage = baselineValues.reduce((a, b) => a + b, 0) / baselineValues.length;
-      const latestCount = latest.count.count ?? 0;
-      if (latestCount < minLatestCount) continue;
-
-      const ratio = baselineAverage > 0 ? latestCount / baselineAverage : latestCount >= minLatestCount ? 3 : 0;
-      if (ratio < 1.8) continue;
-
-      alerts.push({
-        region,
-        diagnosis: c.diagnosis,
-        latestCount,
-        baselineAverage: Math.round(baselineAverage * 10) / 10,
-        ratio: Math.round(ratio * 10) / 10,
-        severity: ratio >= 3 ? "high" : ratio >= 2.3 ? "elevated" : "watch",
-      });
-    }
-  }
-
-  return alerts.sort((a, b) => b.ratio - a.ratio);
-}
-
-export type RegionBenchmark = {
-  diagnosis: string;
-  regionCount: SuppressibleCount;
-  regionShare: number | null; // this diagnosis as a % of this region's visits
-  nationalShare: number | null; // this diagnosis as a % of all visits nationwide
-};
-
-// For one region: how its top conditions' share of visits compares to the
-// same conditions' share nationwide. >1.0-ish "regionShare vs nationalShare"
-// means the region sees that condition disproportionately more than the
-// rest of the country.
-export function getRegionBenchmark(region: string): { region: string; totalRegionVisits: number; totalNationalVisits: number; rows: RegionBenchmark[] } {
-  const db = getDb();
-  const totalRegionVisits = (
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         LEFT JOIN hospitals h ON h.id = d.hospital_id
-         WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?`
-      )
-      .get(region) as { n: number }
-  ).n;
-  const totalNationalVisits = (db.prepare("SELECT COUNT(*) AS n FROM medical_records").get() as { n: number }).n;
-
-  const nationalTop = getTopConditions(8);
-  const rows: RegionBenchmark[] = nationalTop.map((nc) => {
-    const regionRow = db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         LEFT JOIN hospitals h ON h.id = d.hospital_id
-         WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-           AND ${diagnosisKeyExpr("m.diagnosis")} = ${diagnosisKeyExpr("?")}`
-      )
-      .get(region, nc.diagnosis) as { n: number };
-
-    const regionCount = suppress(regionRow.n);
-    return {
-      diagnosis: nc.diagnosis,
-      regionCount,
-      regionShare: totalRegionVisits > 0 && !regionCount.suppressed ? Math.round(((regionCount.count ?? 0) / totalRegionVisits) * 1000) / 10 : null,
-      nationalShare: totalNationalVisits > 0 ? Math.round(((nc.count.count ?? 0) / totalNationalVisits) * 1000) / 10 : null,
-    };
-  });
-
-  return { region, totalRegionVisits, totalNationalVisits, rows };
-}
-
-export type ForecastPoint = { bucket: string; count: number; projected: boolean };
-
-// Simple ordinary-least-squares linear projection over the historical
-// weekly/monthly points for one diagnosis. Deliberately simple (no
-// seasonality model) — the goal is "roughly where is this headed," not a
-// clinical-grade forecast, and the projected points are clearly labeled as
-// such everywhere they're rendered.
-export function getConditionForecast(
-  diagnosis: string,
-  opts: { region?: string; interval?: "week" | "month"; periodsAhead?: number } = {}
-): { history: ForecastPoint[]; forecast: ForecastPoint[] } {
-  const interval = opts.interval ?? "week";
-  const periodsAhead = opts.periodsAhead ?? 4;
-  const trend = getConditionTrend(diagnosis, { region: opts.region, interval });
-
-  const history: ForecastPoint[] = trend.map((t) => ({
-    bucket: t.bucket,
-    count: t.count.suppressed ? 0 : t.count.count ?? 0,
-    projected: false,
-  }));
-
-  if (history.length < 3) return { history, forecast: [] };
-
-  // Ordinary least squares on (index, count).
-  const n = history.length;
-  const xs = history.map((_, i) => i);
-  const ys = history.map((h) => h.count);
-  const xMean = xs.reduce((a, b) => a + b, 0) / n;
-  const yMean = ys.reduce((a, b) => a + b, 0) / n;
-  let num = 0;
-  let den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (xs[i] - xMean) * (ys[i] - yMean);
-    den += (xs[i] - xMean) ** 2;
-  }
-  const slope = den === 0 ? 0 : num / den;
-  const intercept = yMean - slope * xMean;
-
-  const forecast: ForecastPoint[] = [];
-  for (let i = 0; i < periodsAhead; i++) {
-    const x = n + i;
-    const projectedCount = Math.max(0, Math.round(intercept + slope * x));
-    const bucket =
-      interval === "month"
-        ? nextMonthBucket(history[history.length - 1].bucket, i + 1)
-        : nextWeekBucket(history[history.length - 1].bucket, i + 1);
-    forecast.push({ bucket, count: projectedCount, projected: true });
-  }
-
-  return { history, forecast };
-}
-
-function nextMonthBucket(lastBucket: string, offset: number): string {
-  const [y, m] = lastBucket.split("-").map(Number);
-  const d = new Date(Date.UTC(y, (m - 1) + offset, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-
-function nextWeekBucket(lastBucket: string, offset: number): string {
-  // lastBucket looks like "2026-W24" (from strftime('%Y-W%W', ...)).
-  const match = lastBucket.match(/^(\d{4})-W(\d{2})$/);
-  if (!match) return `${lastBucket}+${offset}`;
-  const year = Number(match[1]);
-  const week = Number(match[2]) + offset;
-  return `${year}-W${String(week).padStart(2, "0")}`;
-}
-
-export type DataQualityRow = {
-  region: string;
-  recentWeekVisits: number;
-  priorAverageVisits: number;
-  changePct: number | null;
-  flag: "quiet" | "normal" | "surging";
-};
-
-// Flags regions whose reported visit volume has dropped sharply week over
-// week — usually a sign a hospital's reporting pipeline broke, not that
-// people stopped getting sick. Also flags a sharp rise, which can be a
-// genuine surge OR double-counted/duplicate submissions worth checking.
-export function getDataQualityReport(): DataQualityRow[] {
-  const db = getDb();
-  const regions = getRegionSummary().map((r) => r.region);
-  const rows: DataQualityRow[] = [];
-
-  for (const region of regions) {
-    const weekly = db
-      .prepare(
-        `SELECT strftime('%Y-W%W', m.visit_date) AS bucket, COUNT(*) AS n
-         FROM medical_records m
-         JOIN doctors d ON d.id = m.doctor_id
-         LEFT JOIN hospitals h ON h.id = d.hospital_id
-         WHERE COALESCE(NULLIF(TRIM(h.city), ''), 'Unspecified') = ?
-         GROUP BY bucket
-         ORDER BY bucket ASC`
-      )
-      .all(region) as { bucket: string; n: number }[];
-
-    if (weekly.length < 3) continue;
-    const recent = weekly[weekly.length - 1];
-    const prior = weekly.slice(0, -1).slice(-4);
-    const priorAverage = prior.reduce((a, b) => a + b.n, 0) / prior.length;
-    const changePct = priorAverage > 0 ? Math.round(((recent.n - priorAverage) / priorAverage) * 1000) / 10 : null;
-
-    let flag: DataQualityRow["flag"] = "normal";
-    if (changePct !== null && changePct <= -50) flag = "quiet";
-    else if (changePct !== null && changePct >= 100) flag = "surging";
-    if (flag === "normal") continue;
-
-    rows.push({
-      region,
-      recentWeekVisits: recent.n,
-      priorAverageVisits: Math.round(priorAverage * 10) / 10,
-      changePct,
-      flag,
-    });
-  }
-
-  return rows.sort((a, b) => (a.changePct ?? 0) - (b.changePct ?? 0));
-}
-
-// One more small aggregate: total visit volume nationwide, bucketed by
-// week or month, no diagnosis filter — the "how busy is the whole system"
-// line the weekly bulletin opens with.
-export function getNationalVisitTrend(interval: "week" | "month" = "week", periods = 10): TrendPoint[] {
-  const db = getDb();
-  const bucketExpr = interval === "month" ? "strftime('%Y-%m', visit_date)" : "strftime('%Y-W%W', visit_date)";
-  const rows = db
-    .prepare(`SELECT ${bucketExpr} AS bucket, COUNT(*) AS n FROM medical_records GROUP BY bucket ORDER BY bucket ASC`)
-    .all() as { bucket: string; n: number }[];
-  return rows.slice(-periods).map((r) => ({ bucket: r.bucket, count: suppress(r.n) }));
 }
 
 // ---------- Risk assessments (see lib/risk-scoring.ts) ----------
@@ -2485,11 +1861,11 @@ export function approvePatientRegistration(input: {
         primarySet = true;
       }
 
-      // Registration is a real encounter, so it needs a medical_records row or
-      // the patient stays invisible to the analytics dashboards (which are
-      // driven entirely off visits) until their next recorded visit. An
-      // existing patient is not registering again, so they get no second
-      // 'registration' record — the appointment below is the encounter.
+      // Registration is a real encounter, so it needs a medical_records row —
+      // that's what makes the patient's visit timeline start with the
+      // registration itself instead of being empty until their next recorded
+      // visit. An existing patient is not registering again, so they get no
+      // second 'registration' record — the appointment below is the encounter.
       createMedicalRecord({
         patientId: patient.id,
         doctorId: input.doctorId,
@@ -2519,6 +1895,18 @@ export function approvePatientRegistration(input: {
            reviewed_by = ?, reviewed_at = datetime('now')
        WHERE id = ?`
     ).run(patient.id, appointment.id, input.doctorName, input.registrationId);
+
+    // Uploaded reports become the patient's own documents at the moment the
+    // booking is approved — and their RAG chunks (indexed at booking time,
+    // see lib/rag.ts) re-parent from the registration to the patient inside
+    // this same transaction, so an approval can never leave the corpus
+    // pointing at an orphaned registration.
+    db.prepare(
+      `UPDATE registration_attachments SET patient_id = ? WHERE registration_id = ?`
+    ).run(patient.id, reg.id);
+    db.prepare(
+      `UPDATE rag_chunks SET patient_id = ? WHERE registration_id = ?`
+    ).run(patient.id, reg.id);
 
     return { patientId: patient.id, appointmentId: appointment.id };
   });
@@ -2564,4 +1952,233 @@ export function purgeRegistrationAttachments(registrationId: string, uploadDir: 
   }
   db.prepare("DELETE FROM registration_attachments WHERE registration_id = ?").run(registrationId);
   return removed;
+}
+
+// ---------------------------------------------------------------------------
+// RAG vector index (see lib/rag.ts) — chunk persistence, attachment
+// promotion, and the notification feed. All retrieval math lives in rag.ts;
+// this section is only rows in and out of SQLite.
+// ---------------------------------------------------------------------------
+
+export function findMedicalRecordById(id: string): MedicalRecord | undefined {
+  const db = getDb();
+  return db.prepare("SELECT * FROM medical_records WHERE id = ?").get(id) as MedicalRecord | undefined;
+}
+
+// Prescriptions written as part of one specific visit — the visit chunk text
+// includes them, and the AI-drafted report finalize flow appends new ones.
+export function listPrescriptionsForRecord(medicalRecordId: string): Prescription[] {
+  const db = getDb();
+  // prescriptions has no created_at column; issued_date + rowid is the order.
+  return db
+    .prepare("SELECT * FROM prescriptions WHERE medical_record_id = ? ORDER BY issued_date ASC, rowid ASC")
+    .all(medicalRecordId) as Prescription[];
+}
+
+// Doctor-side finalize of an AI-drafted report: the visit's clinical text is
+// replaced by the (doctor-reviewed) full report. Diagnosis stays a single
+// field, so the full drafted text lives in notes.
+export function finalizeMedicalRecord(
+  id: string,
+  input: { diagnosis: string; notes: string }
+): MedicalRecord | undefined {
+  const db = getDb();
+  db.prepare(`UPDATE medical_records SET diagnosis = ?, notes = ? WHERE id = ?`).run(
+    input.diagnosis,
+    input.notes,
+    id
+  );
+  return findMedicalRecordById(id);
+}
+
+export function createPrescription(input: {
+  patientId: string;
+  doctorId: string;
+  medicalRecordId: string | null;
+  medications: Medication[];
+  instructions: string | null;
+  issuedDate: string;
+}): Prescription {
+  const db = getDb();
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO prescriptions (id, patient_id, doctor_id, medical_record_id, medications, instructions, issued_date)
+     VALUES (?,?,?,?,?,?,?)`
+  ).run(
+    id,
+    input.patientId,
+    input.doctorId,
+    input.medicalRecordId,
+    JSON.stringify(input.medications),
+    input.instructions,
+    input.issuedDate
+  );
+  return db.prepare("SELECT * FROM prescriptions WHERE id = ?").get(id) as Prescription;
+}
+
+// ---------- RAG chunk persistence ----------
+
+export function insertRagChunk(input: {
+  id: string;
+  patientId: string | null;
+  registrationId: string | null;
+  sourceType: RagChunk["source_type"];
+  sourceId: string;
+  chunkIndex: number;
+  label: string;
+  content: string;
+  embedding: Buffer | null;
+  embeddingModel: string | null;
+}): RagChunk {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO rag_chunks (id, patient_id, registration_id, source_type, source_id, chunk_index, label, content, embedding, embedding_model)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    input.id,
+    input.patientId,
+    input.registrationId,
+    input.sourceType,
+    input.sourceId,
+    input.chunkIndex,
+    input.label,
+    input.content,
+    input.embedding,
+    input.embeddingModel
+  );
+  // Keep the FTS mirror in sync for the keyword fallback path.
+  db.prepare(`INSERT INTO rag_chunks_fts (chunk_id, content) VALUES (?, ?)`).run(input.id, input.content);
+  return db.prepare("SELECT * FROM rag_chunks WHERE id = ?").get(input.id) as RagChunk;
+}
+
+export function deleteRagChunksForSource(sourceType: RagChunk["source_type"], sourceId: string): void {
+  const db = getDb();
+  const ids = db
+    .prepare("SELECT id FROM rag_chunks WHERE source_type = ? AND source_id = ?")
+    .all(sourceType, sourceId) as { id: string }[];
+  for (const { id } of ids) {
+    db.prepare("DELETE FROM rag_chunks_fts WHERE chunk_id = ?").run(id);
+  }
+  db.prepare("DELETE FROM rag_chunks WHERE source_type = ? AND source_id = ?").run(sourceType, sourceId);
+}
+
+export function countRagChunksForSource(sourceType: RagChunk["source_type"], sourceId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE source_type = ? AND source_id = ?")
+    .get(sourceType, sourceId) as { n: number };
+  return row.n;
+}
+
+export function countRagChunksMissingEmbedding(patientId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE patient_id = ? AND embedding IS NULL")
+    .get(patientId) as { n: number };
+  return row.n;
+}
+
+export function listRagChunksForPatient(patientId: string): RagChunk[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM rag_chunks WHERE patient_id = ? ORDER BY created_at ASC")
+    .all(patientId) as RagChunk[];
+}
+
+export function listRagChunksForRegistration(registrationId: string): RagChunk[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM rag_chunks WHERE registration_id = ? ORDER BY chunk_index ASC")
+    .all(registrationId) as RagChunk[];
+}
+
+export function setRagChunkEmbedding(id: string, embedding: Buffer, model: string): void {
+  const db = getDb();
+  db.prepare("UPDATE rag_chunks SET embedding = ?, embedding_model = ? WHERE id = ?").run(embedding, model, id);
+}
+
+// Keyword fallback when the local embedding model can't load. The fts table
+// is content-mirrored at insert time; the patient_id filter comes from the
+// join back to rag_chunks, never from user input.
+export function searchRagChunksFtsForPatient(patientId: string, query: string, limit = 5): RagChunk[] {
+  const db = getDb();
+  // FTS5 query syntax is user-facing input here, so reduce it to a quoted
+  // OR of tokens — a malformed MATCH expression would otherwise throw.
+  const tokens = query
+    .split(/[^a-zA-Z0-9]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 1)
+    .slice(0, 12);
+  if (tokens.length === 0) return [];
+  const match = tokens.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
+  try {
+    return db
+      .prepare(
+        `SELECT r.* FROM rag_chunks_fts f
+         JOIN rag_chunks r ON r.id = f.chunk_id
+         WHERE rag_chunks_fts MATCH ? AND r.patient_id = ?
+         ORDER BY bm25(rag_chunks_fts) ASC
+         LIMIT ?`
+      )
+      .all(match, patientId, limit) as RagChunk[];
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Uploaded reports after approval ----------
+
+export function listAttachmentsForPatient(patientId: string): RegistrationAttachment[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM registration_attachments WHERE patient_id = ? ORDER BY created_at ASC")
+    .all(patientId) as RegistrationAttachment[];
+}
+
+// ---------- In-app patient notifications ----------
+
+export function createNotification(input: {
+  patientId: string;
+  type: Notification["type"];
+  title: string;
+  body: string;
+  link?: string | null;
+}): Notification {
+  const db = getDb();
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO notifications (id, patient_id, type, title, body, link) VALUES (?,?,?,?,?,?)`
+  ).run(id, input.patientId, input.type, input.title, input.body, input.link ?? null);
+  return db.prepare("SELECT * FROM notifications WHERE id = ?").get(id) as Notification;
+}
+
+export function listNotificationsForPatient(patientId: string, limit = 20): Notification[] {
+  const db = getDb();
+  return db
+    // rowid breaks ties for notifications created in the same second —
+    // a random-UUID tiebreak would order them nondeterministically.
+    .prepare("SELECT * FROM notifications WHERE patient_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+    .all(patientId, limit) as Notification[];
+}
+
+export function countUnreadNotificationsForPatient(patientId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM notifications WHERE patient_id = ? AND is_read = 0")
+    .get(patientId) as { n: number };
+  return row.n;
+}
+
+// Ownership-scoped: a patient can only ever mark their own notification read.
+export function markNotificationRead(id: string, patientId: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND patient_id = ?")
+    .run(id, patientId);
+  return result.changes > 0;
+}
+
+export function markAllNotificationsRead(patientId: string): void {
+  const db = getDb();
+  db.prepare("UPDATE notifications SET is_read = 1 WHERE patient_id = ?").run(patientId);
 }

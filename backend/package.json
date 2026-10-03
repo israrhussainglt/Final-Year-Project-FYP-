@@ -13,9 +13,15 @@
     "seed": "node scripts/seed.js --force",
     "reminders": "tsx scripts/reminder-scheduler.ts",
     "followups": "tsx scripts/followup-scheduler.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node scripts/ensure-sqlite-shim.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@langchain/community": "^1.1.29",
+    "@langchain/core": "^1.2.14",
+    "@langchain/openai": "^1.6.2",
+    "@langchain/textsplitters": "^1.0.2",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
     "cookie-parser": "^1.4.6",
@@ -27,8 +33,10 @@
     "multer": "^2.4.0",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.16",
+    "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -42,6 +50,7 @@
     "@types/nodemailer": "^6.4.16",
     "@types/pdfkit": "^0.17.6",
     "@types/qrcode": "^1.5.5",
+    "libsql": "^0.5.29",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.9"

@@ -23,8 +23,8 @@ export default async function HospitalAdminOverviewPage() {
           <div className="eyebrow text-teal mb-2">{session?.hospitalName || "Your hospital"}</div>
           <h1 className="font-display text-3xl">Overview</h1>
           <p className="text-sm text-sage mt-2 leading-relaxed max-w-2xl">
-            Patient volume, appointment load, and doctor activity for this hospital only — the
-            same kind of numbers the analytics team sees, scoped to your own doctors.
+            Patient volume, appointment load, and doctor activity for this hospital
+            only — scoped to your own doctors and nothing beyond it.
           </p>
         </div>
 

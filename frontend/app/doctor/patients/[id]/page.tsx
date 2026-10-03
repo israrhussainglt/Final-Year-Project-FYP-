@@ -4,6 +4,8 @@ import { serverFetch } from "@/lib/server-api";
 import { DoctorHeader } from "@/components/doctor/DoctorHeader";
 import { Card, Badge, Button, formatDate, age, recordTypeLabel, recordTypeTone } from "@/components/ui";
 import { AddRecordForm } from "@/components/doctor/AddRecordForm";
+import { AiReportDraft } from "@/components/doctor/AiReportDraft";
+import { ReportSections } from "@/components/report/ReportSections";
 import { StartFollowupForm } from "@/components/doctor/StartFollowupForm";
 import { GuardianPanel } from "@/components/doctor/GuardianPanel";
 import { EditPatientForm } from "@/components/doctor/EditPatientForm";
@@ -159,7 +161,11 @@ export default async function PatientDetailPage({ params }: { params: { id: stri
                     </div>
                     {r.diagnosis && <p className="font-medium mt-2">{r.diagnosis}</p>}
                     {r.symptoms && <p className="text-sm text-sage mt-1">Symptoms: {r.symptoms}</p>}
-                    {r.notes && <p className="text-sm mt-2 leading-relaxed">{r.notes}</p>}
+                    {r.notes && <ReportSections notes={r.notes} />}
+                    <AiReportDraft
+                      patientId={patient.id}
+                      record={{ id: r.id, visit_date: r.visit_date, diagnosis: r.diagnosis, symptoms: r.symptoms, notes: r.notes }}
+                    />
                   </Card>
                 </li>
               ))}

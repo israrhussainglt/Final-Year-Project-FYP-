@@ -3,6 +3,7 @@
 import { Card, Badge, formatDate, recordTypeLabel, recordTypeTone } from "@/components/ui";
 import { PulseMark } from "@/components/PulseMark";
 import type { MedicalReport } from "@/lib/types";
+import { ReportSections } from "@/components/report/ReportSections";
 
 const ACTION_LABEL: Record<string, string> = {
   record_viewed: "Viewed the record",
@@ -194,7 +195,7 @@ export function MedicalReportView({
                 </div>
                 {r.diagnosis && <p className="font-medium mt-1.5 text-sm">{r.diagnosis}</p>}
                 {r.symptoms && <p className="text-sm text-sage mt-1">Symptoms: {r.symptoms}</p>}
-                {r.notes && <p className="text-sm mt-1 leading-relaxed">{r.notes}</p>}
+                {r.notes && <ReportSections notes={r.notes} dense />}
               </li>
             ))}
           </ol>

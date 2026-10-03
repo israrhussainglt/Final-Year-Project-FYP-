@@ -12,6 +12,52 @@ const INK = "#0B2027";
 const SAGE = "#4C6663";
 const LINE = "#DCE4E3";
 
+// Mirror of frontend/lib/report-format.ts's splitReportSections (the two
+// packages are independent, like ageInYears) — AI-drafted reports are stored
+// as one labelled blob in notes and must render with section structure in
+// the PDF too. Unknown text passes through as a single unsectioned block.
+const REPORT_SECTION_LABELS = [
+  "History of Present Illness",
+  "Examination Findings",
+  "Assessment",
+  "Treatment Plan",
+  "Patient Advice",
+  "Follow-up",
+];
+
+function normalizeLabel(s: string): string {
+  return s.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+function splitReportSections(notes: string): { heading: string | null; body: string }[] {
+  const text = (notes || "").trim();
+  if (!text) return [];
+  const labels = new Map(REPORT_SECTION_LABELS.map((l) => [normalizeLabel(l), l]));
+  const out: { heading: string | null; body: string }[] = [];
+  for (const block of text.split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean)) {
+    const lines = block.split("\n");    const firstLine = (lines[0] || "").trim();
+    const colonIdx = firstLine.indexOf(":");
+    const colonCandidate = colonIdx > 0 ? firstLine.slice(0, colonIdx).trim() : null;
+    const bareCandidate = !colonCandidate && firstLine.length <= 48 ? firstLine : null;
+    const matched = colonCandidate && labels.has(normalizeLabel(colonCandidate))
+      ? { heading: labels.get(normalizeLabel(colonCandidate)) as string, rest: firstLine.slice(colonIdx + 1).trim() }
+      : bareCandidate && labels.has(normalizeLabel(bareCandidate))
+        ? { heading: labels.get(normalizeLabel(bareCandidate)) as string, rest: "" }
+        : null;
+    if (matched) {
+      const body = [matched.rest, ...lines.slice(1).map((l) => l.trimEnd())].filter(Boolean).join("\n").trim();
+      out.push({ heading: matched.heading, body });
+      continue;
+    }
+    if (out.length > 0 && out[out.length - 1].heading !== null) {
+      out[out.length - 1].body = (out[out.length - 1].body + "\n\n" + block).trim();
+    } else {
+      out.push({ heading: null, body: block });
+    }
+  }
+  return out;
+}
+
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -97,7 +143,15 @@ export function buildReportPdf(report: NonNullable<MedicalReport>): PDFKit.PDFDo
     if (t.clinician) meta.push(`Seen by ${t.clinician}`);
     if (t.symptoms) meta.push(`Symptoms: ${t.symptoms}`);
     if (meta.length) doc.text(meta.join("  ·  "));
-    if (t.notes) doc.fillColor(INK).text(t.notes, { indent: 0 });
+    if (t.notes) {
+      for (const section of splitReportSections(t.notes)) {
+        if (section.heading) {
+          doc.fontSize(8).fillColor(SAGE).font("Helvetica-Bold").text(section.heading.toUpperCase(), { characterSpacing: 0.5, indent: 4 });
+          doc.font("Helvetica");
+        }
+        doc.fontSize(9).fillColor(INK).font("Helvetica").text(section.body, { indent: 4 });
+      }
+    }
     doc.moveDown(0.4);
   }
 

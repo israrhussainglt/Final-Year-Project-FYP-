@@ -22,12 +22,19 @@ import {
   type HospitalAdminSession,
 } from "./lib/auth";
 import { rateLimit, requestIp } from "./lib/rate-limit";
+import {
+  indexRegistration,
+  indexPatientVisit,
+  retrievePatientContext,
+  draftPatientReport,
+  isReportDrafterConfigured,
+} from "./lib/rag";
 import { sendOtpSms, SMS_CONFIGURED } from "./lib/sms";
 import { csrfProtection, newCsrfToken, csrfCookieOptions, CSRF_COOKIE } from "./lib/csrf";
 import { buildMedicalReport } from "./lib/report";
 import { buildReportPdf } from "./lib/pdf-report";
 import { askClaude, AI_CONFIGURED, OPS_SYSTEM_PROMPT } from "./lib/ai";
-import type { BloodGroup, RegistrationStatus } from "./lib/types";
+import type { BloodGroup, Medication, RegistrationStatus } from "./lib/types";
 import type { AppointmentStatus } from "./lib/types";
 import {
   addEmergencyContact,
@@ -77,18 +84,7 @@ import {
   searchPatients,
   updatePatient,
   verifyOtp,
-  getAnalyticsOverview,
-  getRegionSummary,
-  getProvinceSummary,
-  getHospitalSummary,
-  getTopConditions,
-  getConditionTrend,
-  getRegionConditionMatrix,
-  getOutbreakAlerts,
-  getRegionBenchmark,
-  getConditionForecast,
-  getDataQualityReport,
-  getNationalVisitTrend,
+  findActiveDoctorById,
   findHospitalAdminByEmail,
   findHospitalAdminById,
   listDoctorsForHospital,
@@ -101,6 +97,15 @@ import {
   getDoctorAuditLog,
   listAppointmentsForDoctorInRange,
   createRecurringSeries,
+  findMedicalRecordById,
+  listPrescriptionsForRecord,
+  finalizeMedicalRecord,
+  createPrescription,
+  createNotification,
+  listNotificationsForPatient,
+  countUnreadNotificationsForPatient,
+  markNotificationRead,
+  markAllNotificationsRead,
   joinWaitlist,
   findWaitlistEntryById,
   listWaitlistForDoctor,
@@ -172,12 +177,6 @@ if (!DEMO_MODE && !SMS_CONFIGURED) {
   console.warn("[pulseid-backend] WARNING: DEMO_MODE is off but no SMS gateway is configured (TWILIO_* env vars).");
   console.warn("[pulseid-backend] Patients will be able to request an OTP but will never receive it by SMS.");
 }
-// Not fatal — a deployment might genuinely not run the analytics service —
-// but loud, since a missing key means /api/analytics/* is dead (503) rather
-// than silently open, which is the safe failure mode but worth flagging.
-if (!process.env.ANALYTICS_SERVICE_KEY) {
-  console.warn("[pulseid-backend] WARNING: ANALYTICS_SERVICE_KEY is not set — /api/analytics/* will refuse all requests.");
-}
 
 app.set("trust proxy", true);
 app.use(helmet());
@@ -232,6 +231,13 @@ function guardianFirst<T extends { relationship: string; isPrimary: boolean }>(c
 async function requireDoctor(req: Request, res: Response, next: NextFunction) {
   const session = await verifySession<DoctorSession>(req.cookies?.[DOCTOR_COOKIE]);
   if (!session) return res.status(401).json({ error: "Not authenticated." });
+  // Deactivation has to take effect immediately, not just at next login —
+  // the session JWT is stateless and lives up to 12h, so without this
+  // re-check a doctor the admin just deactivated would keep full access
+  // (patient records, booking allocation, everything) until the cookie
+  // expired on its own. One indexed primary-key lookup per request.
+  const doctor = findDoctorById(session.doctorId);
+  if (!doctor || !doctor.is_active) return res.status(401).json({ error: "Not authenticated." });
   (req as any).doctor = session;
   next();
 }
@@ -344,6 +350,19 @@ function handleUpload(req: Request, res: Response): Promise<void> {
   return new Promise((resolve) => {
     upload.array("reports", MAX_UPLOAD_FILES)(req, res, (err: any) => {
       if (err) {
+        // Multer streams each accepted file to disk as it goes, so an error
+        // part-way through (an oversized file 3 of 5, a disallowed type, too
+        // many files) leaves the earlier files already sitting in UPLOAD_DIR.
+        // Delete them here — the same cleanup the field-validation path below
+        // does — or a rejected submission would orphan the patient's reports.
+        const partial = (req.files as Express.Multer.File[] | undefined) || [];
+        for (const f of partial) {
+          try {
+            fs.rmSync(f.path, { force: true });
+          } catch {
+            /* best effort */
+          }
+        }
         const tooBig = err?.code === "LIMIT_FILE_SIZE";
         const tooMany = err?.code === "LIMIT_FILE_COUNT" || err?.code === "LIMIT_UNEXPECTED_FILE";
         res.status(400).json({
@@ -423,7 +442,9 @@ app.post("/api/booking/requests", async (req, res) => {
     : null;
   if (!doctorId) {
     errors.doctorId = "Please choose a doctor.";
-  } else if (!findDoctorById(doctorId)) {
+  } else if (!findActiveDoctorById(doctorId)) {
+    // Active-only: a request addressed to a deactivated doctor would sit
+    // pending forever, since they can't log in to review it.
     errors.doctorId = "That doctor is no longer available. Please choose another.";
   } else if (nationalId && !errors.nationalId && hasPendingRegistrationForDoctor(nationalId, doctorId)) {
     errors.doctorId = "You already have a request pending with this doctor.";
@@ -469,6 +490,12 @@ app.post("/api/booking/requests", async (req, res) => {
       break;
     }
   }
+  // The form offers three contact slots, and this endpoint is public and
+  // unauthenticated — every usable contact becomes an emergency_contacts row
+  // when a doctor approves, so an unbounded list would be unbounded rows.
+  if (!errors.contacts && contacts.length > 3) {
+    errors.contacts = "You can list at most 3 emergency contacts.";
+  }
   if (isMinor && !errors.contacts && usableContacts.length === 0) {
     errors.contacts = "A parent or guardian's contact is required for patients under 18.";
   }
@@ -508,6 +535,14 @@ app.post("/api/booking/requests", async (req, res) => {
       sizeBytes: f.size,
     });
   }
+
+  // Fire-and-forget RAG indexing of the booking's own details + uploaded
+  // reports (lib/rag.ts). Chunks are keyed to the registration and
+  // re-parented to the patient inside the approval transaction; the
+  // embedding model is local, so this never blocks or fails the request.
+  void indexRegistration(registration.id).catch((err) =>
+    console.error("[pulseid-backend] RAG registration indexing failed:", err)
+  );
 
   res.status(201).json({
     request: {
@@ -967,8 +1002,8 @@ app.post("/api/patient/appointments", requirePatient, (req, res) => {
   const reason = str(req.body?.reason);
 
   if (!doctorId) return res.status(400).json({ error: "Please choose a doctor.", fieldErrors: { doctorId: "Required." } });
-  const doctor = findDoctorById(doctorId);
-  if (!doctor) return res.status(404).json({ error: "Doctor not found." });
+  const doctor = findActiveDoctorById(doctorId);
+  if (!doctor) return res.status(404).json({ error: "That doctor is no longer available. Please choose another." });
 
   // Patients only request a doctor and (optionally) a reason — the actual
   // date/time is set later by the doctor/clinic, never by the patient.
@@ -1022,8 +1057,8 @@ app.post("/api/patient/waitlist", requirePatient, (req, res) => {
   const doctorId = str(req.body?.doctorId);
   const reason = str(req.body?.reason);
   if (!doctorId) return res.status(400).json({ error: "Please choose a doctor.", fieldErrors: { doctorId: "Required." } });
-  const doctor = findDoctorById(doctorId);
-  if (!doctor) return res.status(404).json({ error: "Doctor not found." });
+  const doctor = findActiveDoctorById(doctorId);
+  if (!doctor) return res.status(404).json({ error: "That doctor is no longer available. Please choose another." });
 
   const entry = joinWaitlist({ patientId: session.patientId, doctorId, reason: reason || null });
 
@@ -2015,12 +2050,9 @@ app.post("/api/patients", requireDoctor, (req, res) => {
   }
 
   // Registration is itself a real-world encounter at this doctor's hospital,
-  // so it needs its own medical_records row — otherwise a freshly-registered
-  // patient never shows up in the region/analytics dashboards (which are
-  // driven entirely off visits, see repo.ts) until their *next* recorded
-  // visit. This keeps analytics live/correct without touching the region
-  // model itself (still hospital-of-visit, never the patient's address —
-  // see EditPatientForm's address hint and repo.ts's analytics comment).
+  // so it needs its own medical_records row — that's what makes the patient's
+  // visit timeline (and their report) start with the registration itself
+  // instead of being empty until their next recorded visit.
   createMedicalRecord({
     patientId: patient.id,
     doctorId: session.doctorId,
@@ -2310,6 +2342,13 @@ app.post("/api/patients/:id/records", requireDoctor, (req, res) => {
 
   logAudit({ patientId: patient.id, actorRole: "doctor", actorName: session.fullName, actorId: session.doctorId, action: "record_created", details: `Added ${String(recordType).replace("_", " ")}: ${diagnosis}` });
 
+  // Fire-and-forget RAG indexing of the new visit (lib/rag.ts) — the AI
+  // report drafter retrieves from these chunks. Local embeddings, so this
+  // never blocks or fails the save itself.
+  void indexPatientVisit(patient.id, record.id).catch((err) =>
+    console.error("[pulseid-backend] RAG visit indexing failed:", err)
+  );
+
   // Only score when at least one vital was actually provided — a visit
   // with no vitals attached simply has nothing to score.
   let riskAssessment = null;
@@ -2346,6 +2385,167 @@ app.post("/api/patients/:id/records", requireDoctor, (req, res) => {
   }
 
   res.json({ record, riskAssessment, riskDisclaimer: riskAssessment ? RISK_DISCLAIMER : undefined });
+});
+
+// ---------------------------------------------------------------------------
+// AI-drafted clinical reports (RAG over this patient's record, lib/rag.ts).
+//
+// Two steps, deliberately split: `draft` asks Grok for a structured draft
+// grounded in retrieved chunks and the doctor's own visit notes — it writes
+// NOTHING to the database. `finalize` saves the doctor-reviewed version as
+// the visit's clinical text, stores every prescription as a structured row,
+// and sends the patient an in-app notification. The doctor's approval step
+// in between is the human gate; the draft is a convenience, never an
+// automatic clinical decision.
+// ---------------------------------------------------------------------------
+
+const AI_REPORT_DISCLAIMER =
+  "AI-drafted from the doctor's notes and this patient's record — reviewed and approved by the doctor before saving. A drafting aid, not a diagnosis.";
+
+app.post("/api/patients/:id/records/:recordId/draft", requireDoctor, async (req, res) => {
+  if (rateLimited(req, res, "doctor-ai-draft", 10, 60_000)) return;
+  const session = (req as any).doctor as DoctorSession;
+  const patient = findPatientById(req.params.id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  const record = findMedicalRecordById(req.params.recordId);
+  if (!record || record.patient_id !== patient.id) {
+    return res.status(404).json({ error: "Visit not found." });
+  }
+  if (!isReportDrafterConfigured()) {
+    return res.status(503).json({
+      error: "AI report drafting isn't configured for this deployment yet. Set GROQ_API_KEY in backend/.env (key from console.groq.com) and restart the backend.",
+    });
+  }
+
+  // Keywords come from the request body when the doctor drafts before
+  // saving detailed notes; otherwise the visit's own fields ARE the notes.
+  const keywords =
+    str(req.body?.keywords) ||
+    [record.diagnosis, record.symptoms, record.notes].filter(Boolean).join(". ");
+  if (!keywords) {
+    return res.status(400).json({ error: "Write a few keywords or short sentences about the visit first." });
+  }
+
+  try {
+    const { docs, mode } = await retrievePatientContext(
+      patient.id,
+      `${keywords} ${record.diagnosis ?? ""} ${record.symptoms ?? ""}`.trim()
+    );
+    const draft = await draftPatientReport({
+      patientName: patient.full_name,
+      visitDate: record.visit_date,
+      keywords,
+      docs,
+    });
+    res.json({
+      draft,
+      retrieval: { mode, sources: docs.map((d) => d.metadata.label) },
+      disclaimer: AI_REPORT_DISCLAIMER,
+    });
+  } catch (err) {
+    console.error("[pulseid-backend] AI report drafting failed:", err);
+    res.status(500).json({ error: "Couldn't draft the report. Please try again." });
+  }
+});
+
+app.post("/api/patients/:id/records/:recordId/finalize", requireDoctor, (req, res) => {
+  const session = (req as any).doctor as DoctorSession;
+  const patient = findPatientById(req.params.id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  const record = findMedicalRecordById(req.params.recordId);
+  if (!record || record.patient_id !== patient.id) {
+    return res.status(404).json({ error: "Visit not found." });
+  }
+
+  const diagnosis = str(req.body?.diagnosis);
+  const notes = str(req.body?.notes);
+  if (!diagnosis || !notes) {
+    return res.status(400).json({ error: "A diagnosis and the report text are both required." });
+  }
+
+  const rows = Array.isArray(req.body?.prescriptions) ? req.body.prescriptions : [];
+  if (rows.length > 20) {
+    return res.status(400).json({ error: "A visit can carry at most 20 prescriptions." });
+  }
+  const medications: Medication[] = [];
+  const rowInstructions: string[] = [];
+  for (const row of rows) {
+    const name = str(row?.name);
+    if (!name) return res.status(400).json({ error: "Every prescription needs a medication name." });
+    medications.push({
+      name,
+      dosage: str(row?.dosage),
+      frequency: str(row?.frequency),
+      duration: str(row?.duration),
+    });
+    const instruction = str(row?.instructions);
+    if (instruction) rowInstructions.push(`${name}: ${instruction}`);
+  }
+
+  const updated = finalizeMedicalRecord(record.id, { diagnosis, notes });
+  const prescription = medications.length
+    ? createPrescription({
+        patientId: patient.id,
+        doctorId: session.doctorId,
+        medicalRecordId: record.id,
+        medications,
+        instructions: rowInstructions.join("; ") || null,
+        issuedDate: new Date().toISOString().slice(0, 10),
+      })
+    : null;
+
+  // In-app notification to the patient — the "sent" moment of the flow.
+  // Deliberately no email/SMS: those are separately configured channels.
+  createNotification({
+    patientId: patient.id,
+    type: "report",
+    title: `New report from ${session.fullName}`,
+    body: `Your visit report for ${record.visit_date} is ready, including any prescriptions.`,
+    link: "/patient/records",
+  });
+
+  logAudit({
+    patientId: patient.id,
+    actorRole: "doctor",
+    actorName: session.fullName,
+    actorId: session.doctorId,
+    action: "report_finalized",
+    details: `AI-assisted report finalised for visit ${record.visit_date}${medications.length ? ` (${medications.length} prescription${medications.length === 1 ? "" : "s"} labelled)` : ""}`,
+  });
+
+  res.json({ record: updated, prescription, patientNotified: true, disclaimer: AI_REPORT_DISCLAIMER });
+});
+
+// Patient-side in-app notification feed. No email/SMS — deliberately in-app
+// only, like every other notification path in this app.
+app.get("/api/patient/notifications", requirePatient, (req, res) => {
+  const session = (req as any).patient as PatientSession;
+  res.json({
+    notifications: listNotificationsForPatient(session.patientId).map((n) => ({
+      id: n.id,
+      type: n.type,
+      title: n.title,
+      body: n.body,
+      link: n.link,
+      isRead: Boolean(n.is_read),
+      createdAt: n.created_at,
+    })),
+    unreadCount: countUnreadNotificationsForPatient(session.patientId),
+  });
+});
+
+app.post("/api/patient/notifications/:id/read", requirePatient, (req, res) => {
+  const session = (req as any).patient as PatientSession;
+  if (!markNotificationRead(req.params.id, session.patientId)) {
+    return res.status(404).json({ error: "Notification not found." });
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/patient/notifications/read-all", requirePatient, (req, res) => {
+  const session = (req as any).patient as PatientSession;
+  markAllNotificationsRead(session.patientId);
+  res.json({ ok: true });
 });
 
 // Latest risk assessment plus history for a patient — doctor view.
@@ -2527,12 +2727,8 @@ app.get("/api/hospital-admin/me", requireHospitalAdmin, (req, res) => {
 });
 
 // Own-hospital dashboard: patient volume, appointment load, and per-doctor
-// activity — the same shape of numbers the analytics service already
-// computes per-hospital for analysts (see getHospitalSummary/requireAnalyticsKey
-// below), but scoped to exactly the requesting admin's own hospital_id and
-// never suppressed, since an admin viewing their own hospital's real counts
-// isn't the cross-hospital re-identification risk that suppression guards
-// against.
+// activity, scoped to exactly the requesting admin's own hospital_id — which
+// always comes from the session, never the request body.
 app.get("/api/hospital-admin/stats", requireHospitalAdmin, (req, res) => {
   const session = (req as any).hospitalAdmin as HospitalAdminSession;
   res.json({ stats: getHospitalAdminStats(session.hospitalId) });
@@ -3023,104 +3219,9 @@ app.patch("/api/hospital-admin/patients/:id", requireHospitalAdmin, (req, res) =
 });
 
 // ---------------------------------------------------------------------------
-// Analytics — service-to-service only, never reachable with a doctor or
-// patient session. The analytics app is a separate deployable service (its
-// own login, its own users) that calls these routes server-side with a
-// shared secret in a header — the same trust-boundary idea as the
-// doctor/patient JWTs, just for a machine caller instead of a browser.
-//
-// Every route here returns aggregate counts (optionally small-cell
-// suppressed — see MIN_CELL_SIZE in lib/repo.ts) and nothing else. There is
-// no route in this group, and there must never be one, that accepts a
-// patient ID or National ID and returns anything about a specific person.
+// 404 + central error handler.
 // ---------------------------------------------------------------------------
 
-function requireAnalyticsKey(req: Request, res: Response, next: NextFunction) {
-  const expected = process.env.ANALYTICS_SERVICE_KEY;
-  if (!expected) {
-    // Same "fail loud, not silent" posture as the other production guards
-    // above — an analytics service key that was never set would otherwise
-    // mean this whole aggregate-data surface sits open with no auth at all.
-    console.error("[pulseid-backend] ANALYTICS_SERVICE_KEY is not set — refusing analytics requests.");
-    return res.status(503).json({ error: "Analytics API is not configured." });
-  }
-  const provided = req.get("x-analytics-key");
-  if (!provided || provided !== expected) {
-    return res.status(401).json({ error: "Not authenticated." });
-  }
-  next();
-}
-
-app.get("/api/analytics/overview", requireAnalyticsKey, (_req, res) => {
-  res.json(getAnalyticsOverview());
-});
-
-app.get("/api/analytics/regions", requireAnalyticsKey, (_req, res) => {
-  res.json({ regions: getRegionSummary() });
-});
-
-app.get("/api/analytics/provinces", requireAnalyticsKey, (_req, res) => {
-  res.json({ provinces: getProvinceSummary() });
-});
-
-// Hospital-level drill-down under a region (or every region at once if
-// `region` is omitted): each hospital's visit/patient counts and doctor
-// count. Completes the region -> hospital -> doctor rollup chain; the
-// region/province routes above stop at region.
-app.get("/api/analytics/hospitals", requireAnalyticsKey, (req, res) => {
-  const region = typeof req.query.region === "string" && req.query.region.trim() ? req.query.region.trim() : undefined;
-  res.json({ hospitals: getHospitalSummary(region) });
-});
-
-app.get("/api/analytics/conditions", requireAnalyticsKey, (req, res) => {
-  const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 50);
-  const region = typeof req.query.region === "string" && req.query.region.trim() ? req.query.region.trim() : undefined;
-  res.json({ conditions: getTopConditions(limit, region) });
-});
-
-app.get("/api/analytics/trends", requireAnalyticsKey, (req, res) => {
-  const diagnosis = str(req.query.diagnosis as string);
-  if (!diagnosis) return res.status(400).json({ error: "diagnosis query param is required." });
-  const region = typeof req.query.region === "string" && req.query.region.trim() ? req.query.region.trim() : undefined;
-  const interval = req.query.interval === "month" ? "month" : "week";
-  res.json({ diagnosis, interval, points: getConditionTrend(diagnosis, { region, interval }) });
-});
-
-app.get("/api/analytics/matrix", requireAnalyticsKey, (req, res) => {
-  const topN = Math.min(Math.max(Number(req.query.topN) || 6, 1), 15);
-  res.json(getRegionConditionMatrix(topN));
-});
-
-app.get("/api/analytics/alerts", requireAnalyticsKey, (_req, res) => {
-  res.json({ alerts: getOutbreakAlerts() });
-});
-
-app.get("/api/analytics/benchmark", requireAnalyticsKey, (req, res) => {
-  const region = str(req.query.region as string);
-  if (!region) return res.status(400).json({ error: "region query param is required." });
-  res.json(getRegionBenchmark(region));
-});
-
-app.get("/api/analytics/forecast", requireAnalyticsKey, (req, res) => {
-  const diagnosis = str(req.query.diagnosis as string);
-  if (!diagnosis) return res.status(400).json({ error: "diagnosis query param is required." });
-  const region = typeof req.query.region === "string" && req.query.region.trim() ? req.query.region.trim() : undefined;
-  const interval = req.query.interval === "month" ? "month" : "week";
-  const periodsAhead = Math.min(Math.max(Number(req.query.periodsAhead) || 4, 1), 12);
-  res.json({ diagnosis, interval, ...getConditionForecast(diagnosis, { region, interval, periodsAhead }) });
-});
-
-app.get("/api/analytics/quality", requireAnalyticsKey, (_req, res) => {
-  res.json({ rows: getDataQualityReport() });
-});
-
-app.get("/api/analytics/national-trend", requireAnalyticsKey, (req, res) => {
-  const interval = req.query.interval === "month" ? "month" : "week";
-  const periods = Math.min(Math.max(Number(req.query.periods) || 10, 1), 26);
-  res.json({ interval, points: getNationalVisitTrend(interval, periods) });
-});
-
-// ---------------------------------------------------------------------------
 app.use((_req, res) => res.status(404).json({ error: "Not found." }));
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

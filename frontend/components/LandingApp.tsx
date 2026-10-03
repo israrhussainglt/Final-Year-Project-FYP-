@@ -203,25 +203,34 @@ function Website({ t }: { t: LandingCopy }) {
         >
           <span className="font-display italic text-xl">{t.brand}</span>
         </Link>
-        <div className="flex items-center gap-6">
-          <span className="eyebrow text-sage hidden md:inline">{t.eyebrowNetwork}</span>
-          <div className="flex flex-wrap items-center gap-3 text-sm font-medium">
-            <Link href="/doctor/login" className="text-sage hover:text-teal-dark transition-colors">
-              {t.navDoctor}
-            </Link>
-            <span className="text-line">·</span>
-            <Link href="/hospital-admin/login" className="text-sage hover:text-teal-dark transition-colors">
-              {t.navAdmin}
-            </Link>
-            <span className="text-line">·</span>
-            <Link href="/patient/login" className="text-sage hover:text-ink transition-colors">
-              {t.navPatient}
-            </Link>
-            <span className="text-line">·</span>
-            <Link href="/emergency/scan" className="text-alert hover:text-alert/80 transition-colors">
-              {t.navEmergency}
-            </Link>
-          </div>
+        <div className="flex items-center gap-4 min-w-0">
+          <span className="eyebrow text-sage hidden lg:inline shrink-0">{t.eyebrowNetwork}</span>
+          <nav
+            aria-label={t.navAriaLabel}
+            className="min-w-0 max-w-full overflow-x-auto no-scrollbar snap-x rounded-full border border-line bg-white/95 backdrop-blur shadow-card p-1.5"
+          >
+            {/* Scrollable portal strip: the four role links stay on one line
+                at any width — narrow screens scroll the strip instead of
+                wrapping it into a second row. The surface matches the
+                floating view/language toggles so the header reads as one
+                design system; RTL flips the scroll direction natively. */}
+            <div className="flex items-center gap-1">
+              {[
+                { href: "/doctor/login", label: t.navDoctor, cls: "text-sage hover:text-ink hover:bg-paper" },
+                { href: "/hospital-admin/login", label: t.navAdmin, cls: "text-sage hover:text-ink hover:bg-paper" },
+                { href: "/patient/login", label: t.navPatient, cls: "bg-teal-light text-teal-dark hover:bg-teal-light/70" },
+                { href: "/emergency/scan", label: t.navEmergency, cls: "text-alert hover:bg-alert/10" },
+              ].map((role) => (
+                <Link
+                  key={role.href}
+                  href={role.href}
+                  className={`focus-ring shrink-0 snap-start whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${role.cls}`}
+                >
+                  {role.label}
+                </Link>
+              ))}
+            </div>
+          </nav>
         </div>
       </header>
 

@@ -299,11 +299,6 @@ CREATE TABLE IF NOT EXISTS appointment_waitlist (
 CREATE INDEX IF NOT EXISTS idx_waitlist_doctor ON appointment_waitlist(doctor_id, status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_waitlist_patient ON appointment_waitlist(patient_id, status);
 
--- AI-drafted epidemiological bulletins. Written by the analytics service
--- (scheduled weekly/monthly, or generated on demand), always created as
--- 'draft' — an analyst has to explicitly approve one before it counts as
--- published. The backend never generates content itself; it only stores
--- what the analytics service posts here.
 -- One row per rule-based risk score run (see lib/risk-scoring.ts), usually
 -- triggered when a doctor adds a visit with vitals attached. Kept as full
 -- history, not a single "current risk" column, so trends over time are
@@ -393,6 +388,7 @@ CREATE INDEX IF NOT EXISTS idx_patient_registrations_doctor
 CREATE TABLE IF NOT EXISTS registration_attachments (
   id TEXT PRIMARY KEY,
   registration_id TEXT NOT NULL REFERENCES patient_registrations(id) ON DELETE CASCADE,
+  patient_id TEXT REFERENCES patients(id),
   stored_name TEXT NOT NULL,
   original_name TEXT NOT NULL,
   mime_type TEXT NOT NULL,
@@ -402,18 +398,41 @@ CREATE TABLE IF NOT EXISTS registration_attachments (
 CREATE INDEX IF NOT EXISTS idx_registration_attachments_registration
   ON registration_attachments(registration_id);
 
-CREATE TABLE IF NOT EXISTS bulletins (
+-- RAG vector index (lib/rag.ts): one row per indexable text chunk of the
+-- patient's record — profile details, visits, uploaded report PDFs. The
+-- embedding BLOB is a normalized MiniLM vector, NULL when the local model
+-- isn't loaded yet (those rows still serve the FTS keyword fallback).
+CREATE TABLE IF NOT EXISTS rag_chunks (
   id TEXT PRIMARY KEY,
-  period_type TEXT NOT NULL CHECK (period_type IN ('week','month')),
-  period_label TEXT NOT NULL,
-  title TEXT NOT NULL,
-  content_markdown TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','approved','dismissed')),
-  generated_by TEXT NOT NULL DEFAULT 'scheduled' CHECK (generated_by IN ('scheduled','manual')),
-  reviewed_at TEXT,
+  patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
+  registration_id TEXT REFERENCES patient_registrations(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL CHECK (source_type IN ('profile','visit','attachment')),
+  source_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL DEFAULT 0,
+  label TEXT NOT NULL,
+  content TEXT NOT NULL,
+  embedding BLOB,
+  embedding_model TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_bulletins_created ON bulletins(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_patient ON rag_chunks(patient_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_registration ON rag_chunks(registration_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(chunk_id UNINDEXED, content);
+
+-- In-app-only patient notifications (e.g. an AI-drafted report was sent).
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  type TEXT NOT NULL DEFAULT 'system' CHECK (type IN ('report','system')),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  link TEXT,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_patient ON notifications(patient_id, is_read, created_at DESC);
+
 `);
 
 const patientCount = db.prepare("SELECT COUNT(*) c FROM patients").get().c;
@@ -746,173 +765,12 @@ const seedTx = db.transaction(() => {
     });
   }
 
-  // ---------------------------------------------------------------------
-  // Extra regions — purely so the analytics service (region comparisons,
-  // the outbreak map, forecasting, anomaly alerts) has more than one city
-  // to work with. These are lightweight synthetic patients/visits, not
-  // part of the "log in as this person" demo cast above.
-  // ---------------------------------------------------------------------
-  // Each hospital now seeds 2+ doctors across different specializations
-  // (never an empty hospital) and gets its own hospital-admin account. Every
-  // region in the province list is represented, with two hospitals in
-  // Gilgit-Baltistan (DHQ Gilgit + Skardu Civil Hospital) as the worked
-  // example for the region -> hospital -> doctor hierarchy documented in
-  // the README.
-  const regionHospitals = [
-    {
-      city: "Karachi",
-      province: "Sindh",
-      name: "Karachi Civic Hospital",
-      adminName: "Farah Siddiqui",
-      adminEmail: "admin.karachicivic@pulseid.dev",
-      doctors: [
-        { name: "Dr. Sana Iqbal", email: "sana.iqbal@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Omar Farooqi", email: "omar.farooqi@pulseid.dev", specialization: "Cardiologist" },
-        { name: "Dr. Rabia Yousuf", email: "rabia.yousuf@pulseid.dev", specialization: "Child Specialist" },
-      ],
-    },
-    {
-      city: "Islamabad",
-      province: "Islamabad Capital Territory",
-      name: "Islamabad Capital Hospital",
-      adminName: "Tariq Mehmood",
-      adminEmail: "admin.islamabadcapital@pulseid.dev",
-      doctors: [
-        { name: "Dr. Usman Farooq", email: "usman.farooq@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Hira Abbasi", email: "hira.abbasi@pulseid.dev", specialization: "Dermatologist" },
-      ],
-    },
-    {
-      city: "Peshawar",
-      province: "Khyber Pakhtunkhwa",
-      name: "Peshawar City Hospital",
-      adminName: "Junaid Shinwari",
-      adminEmail: "admin.peshawarcity@pulseid.dev",
-      doctors: [
-        { name: "Dr. Nadia Khattak", email: "nadia.khattak@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Adeel Yousafzai", email: "adeel.yousafzai@pulseid.dev", specialization: "Orthopedic Surgeon" },
-      ],
-    },
-    {
-      city: "Quetta",
-      province: "Balochistan",
-      name: "Quetta Regional Hospital",
-      adminName: "Shazia Bugti",
-      adminEmail: "admin.quettaregional@pulseid.dev",
-      doctors: [
-        { name: "Dr. Bilal Marri", email: "bilal.marri@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Mahnoor Achakzai", email: "mahnoor.achakzai@pulseid.dev", specialization: "Gynecologist" },
-      ],
-    },
-    // Gilgit-Baltistan — two hospitals, matching the hierarchy example
-    // in the README (DHQ Gilgit + Skardu Civil Hospital, each with its
-    // own hospital-admin login, distinct from each other and from any
-    // doctor's login).
-    {
-      city: "Gilgit",
-      province: "Gilgit-Baltistan",
-      name: "DHQ Gilgit",
-      adminName: "Rahat Karim",
-      adminEmail: "admin.dhqgilgit@pulseid.dev",
-      doctors: [
-        { name: "Dr. Amina Baig", email: "amina.baig@pulseid.dev", specialization: "Child Specialist" },
-        { name: "Dr. Karim Hunzai", email: "karim.hunzai@pulseid.dev", specialization: "General Medicine" },
-      ],
-    },
-    {
-      city: "Skardu",
-      province: "Gilgit-Baltistan",
-      name: "Skardu Civil Hospital",
-      adminName: "Bilal Skardu",
-      adminEmail: "admin.skarducivil@pulseid.dev",
-      doctors: [
-        { name: "Dr. Fatima Sheikh", email: "fatima.sheikh@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Zubair Baltistani", email: "zubair.baltistani@pulseid.dev", specialization: "Cardiologist" },
-      ],
-    },
-    {
-      city: "Muzaffarabad",
-      province: "Azad Jammu & Kashmir",
-      name: "Muzaffarabad General Hospital",
-      adminName: "Imtiaz Raja",
-      adminEmail: "admin.muzaffarabadgeneral@pulseid.dev",
-      doctors: [
-        { name: "Dr. Faiza Chaudhry", email: "faiza.chaudhry@pulseid.dev", specialization: "General Medicine" },
-        { name: "Dr. Waqas Mughal", email: "waqas.mughal@pulseid.dev", specialization: "Child Specialist" },
-      ],
-    },
-  ];
-  const conditionPool = ["Dengue Fever", "Seasonal Influenza", "Type 2 Diabetes", "Hypertension", "Typhoid Fever"];
-  let seededVisits = 0;
-  let doctorLicenseSeq = 0;
-
-  regionHospitals.forEach((rh, idx) => {
-    const hId = uuid();
-    insertHospital.run(hId, rh.name, rh.city, rh.province);
-    seedHospitalAdmin(hId, rh.name, rh.adminName, rh.adminEmail);
-
-    const doctorIds = rh.doctors.map((d) => {
-      doctorLicenseSeq++;
-      const dId = uuid();
-      insertDoctor.run(dId, d.name, d.email, hash("doctor123"), `PMC-6${doctorLicenseSeq}812`, d.specialization, hId);
-      return dId;
-    });
-
-    // A handful of synthetic patients per region so patient-count aggregates
-    // aren't just "1 person visited 40 times".
-    const synthPatients = [1, 2].map((n) => {
-      const pid = uuid();
-      insertPatient.run({
-        id: pid,
-        national_id: `${41000 + idx * 100 + n}-${1000000 + idx * 7 + n}-${n}`,
-        id_type: "cnic",
-        full_name: `${rh.city} Resident ${n}`,
-        date_of_birth: "1990-01-01",
-        gender: n % 2 === 0 ? "female" : "male",
-        phone_number: "+92 300 0000000",
-        email: "",
-        address: `${rh.city}, Pakistan`,
-        blood_group: "O+",
-        allergies: "None known",
-        chronic_conditions: "None",
-        password_hash: hash("patient123"),
-        emergency_qr_token: token(),
-      });
-      return pid;
-    });
-
-    // 10 weeks of visits, split across this hospital's doctors. Karachi
-    // gets a deliberate late spike in Dengue so the outbreak-alert/forecast
-    // features have something real to flag.
-    for (let week = 9; week >= 0; week--) {
-      const visitDate = new Date(Date.UTC(2026, 5, 15) - week * 7 * 86400000).toISOString().slice(0, 10);
-      let visitsThisWeek = 3 + ((week + idx) % 3);
-      const isKarachiSpikeWeek = rh.city === "Karachi" && week === 0;
-      if (isKarachiSpikeWeek) visitsThisWeek = 10;
-      for (let v = 0; v < visitsThisWeek; v++) {
-        const diagnosis = isKarachiSpikeWeek && v < 8 ? "Dengue Fever" : conditionPool[(v + week + idx) % conditionPool.length];
-        insertRecord.run({
-          id: uuid(),
-          patient_id: synthPatients[v % synthPatients.length],
-          doctor_id: doctorIds[v % doctorIds.length],
-          record_type: "diagnosis",
-          visit_date: visitDate,
-          diagnosis,
-          symptoms: "",
-          notes: "Regional surveillance record (synthetic demo data).",
-        });
-        seededVisits++;
-      }
-    }
-  });
-
-  return { patients, doctorId, doctor2Id, seededVisits };
+  return { patients, doctorId, doctor2Id };
 });
 
 const result = seedTx();
 
 console.log("[seed] Database ready at", DB_PATH);
-console.log(`[seed] Seeded ${result.seededVisits} additional regional visits across Karachi, Islamabad, Peshawar, Quetta, Gilgit, Skardu, Muzaffarabad for analytics demo data.`);
 console.log("[seed] Demo doctor login: ayesha.raza@pulseid.dev / doctor123");
 console.log("[seed] Demo patient login (National ID + any 6-digit OTP shown on screen):");
 for (const p of result.patients) {

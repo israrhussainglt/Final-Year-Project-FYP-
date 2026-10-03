@@ -71,6 +71,19 @@ alerts list right away. Point out: both the risk score and the alert flag
 are plain rule-based thresholds, not opaque ML — whoever's looking at
 either one can see exactly why it fired.
 
+**Beat 7 — optional: AI-drafted report (RAG) (90s, needs `GROQ_API_KEY`)**
+
+On the same patient's page, add a visit typing ONLY keywords in the notes
+("fever 4 days, headache, ?dengue, paracetamol, CBC test"). On that visit's
+timeline card click **✦ Draft full report with AI** — in seconds the RAG
+pipeline retrieves this patient's profile, past visits and any uploaded
+report PDFs, and Groq drafts a structured report with every prescription
+labelled (dose, frequency, duration, instructions). Edit anything, then
+**Approve & send to patient** — the patient's bell badge lights up
+instantly. Point out: the AI never saves anything by itself (doctor
+approves), the retrieval is local embeddings on SQLite, and the citations
+name the visits/reports each claim came from.
+
 ## 3. Login cheat-sheet
 
 | Role | Identifier | Password / Code |
@@ -90,13 +103,8 @@ either one can see exactly why it fired.
   security demo; wait ~60s or restart the backend to clear it.
 - **Static QR card doesn't resolve** → confirm `qr_is_static = 1` for that
   patient: `sqlite3 backend/data/pulseid.db "SELECT full_name, qr_is_static FROM patients;"`
-- **Analytics: `503 Analytics API is not configured.`** → `backend/.env` is
-  missing `ANALYTICS_SERVICE_KEY`, or the backend process was already
-  running when you added it. `.env` is only read at startup — stop the
-  backend (Ctrl+C) and run `npm run dev` again after editing it.
-- **Analytics: `401` on dashboard data** → `ANALYTICS_SERVICE_KEY` in
-  `backend/.env` and `analytics/.env.local` must be byte-for-byte identical.
-- **Analytics login fails** → the admin account only auto-creates the
-  *first* time the app runs against an empty database. If you changed
-  `ANALYTICS_ADMIN_PASSWORD` after already running it once, delete
-  `analytics/data/` and restart so it re-bootstraps with the new password.
+- **"Draft report with AI" says not configured** → `backend/.env` has no
+  `GROQ_API_KEY`. Paste a key from <https://console.groq.com/keys> and
+  restart the backend (`.env` is read at startup). The first draft also
+  downloads the local embedding model (~25 MB, once, into
+  `backend/data/models`) — every draft after that is instant-warm.

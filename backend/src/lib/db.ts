@@ -31,6 +31,7 @@ export function getDb(): Database.Database {
     migrateFollowupAgents(db);
     migrateFollowupCheckins(db);
     migratePatientRegistrations(db);
+    migrateRagAndNotifications(db);
     global.__pulseidDb = db;
   }
   return global.__pulseidDb;
@@ -375,5 +376,55 @@ function migrateFollowupCheckins(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_followup_checkins_agent ON followup_checkins(agent_id, sent_at DESC);
     CREATE INDEX IF NOT EXISTS idx_followup_checkins_patient ON followup_checkins(patient_id, status);
     CREATE INDEX IF NOT EXISTS idx_followup_checkins_alerts ON followup_checkins(risk_flag, doctor_alerted_at);
+  `);
+}
+
+// RAG index (lib/rag.ts), attachment promotion, and in-app notifications —
+// the doctor-side AI report flow. Three things in one idempotent migration:
+//
+// 1. registration_attachments.patient_id — uploaded reports used to live only
+//    against the booking *request* and dropped out of sight once approved.
+//    approvePatientRegistration stamps this, promoting them to the patient's
+//    own documents and into the RAG corpus.
+// 2. rag_chunks — the vector index. One row per indexable text chunk; the
+//    embedding BLOB is the normalized MiniLM vector (or NULL when the local
+//    model isn't available yet — those rows still serve the FTS fallback).
+//    rag_chunks_fts mirrors content for keyword retrieval without embeddings.
+// 3. notifications — in-app-only patient notifications (AI-drafted report
+//    sent, etc.). No email/SMS — those are separate configured channels.
+function migrateRagAndNotifications(db: Database.Database): void {
+  const attachmentColumns = db.prepare(`PRAGMA table_info(registration_attachments)`).all() as { name: string }[];
+  if (attachmentColumns.length > 0 && !attachmentColumns.some((c) => c.name === "patient_id")) {
+    db.exec(`ALTER TABLE registration_attachments ADD COLUMN patient_id TEXT REFERENCES patients(id);`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rag_chunks (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
+      registration_id TEXT REFERENCES patient_registrations(id) ON DELETE CASCADE,
+      source_type TEXT NOT NULL CHECK (source_type IN ('profile','visit','attachment')),
+      source_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL DEFAULT 0,
+      label TEXT NOT NULL,
+      content TEXT NOT NULL,
+      embedding BLOB,
+      embedding_model TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_patient ON rag_chunks(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_registration ON rag_chunks(registration_id);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_id);
+    CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(chunk_id UNINDEXED, content);
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      type TEXT NOT NULL DEFAULT 'system' CHECK (type IN ('report','system')),
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      link TEXT,
+      is_read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_patient ON notifications(patient_id, is_read, created_at DESC);
   `);
 }

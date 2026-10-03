@@ -65,6 +65,13 @@ export interface MedicalRecord {
   diagnosis: string | null;
   symptoms: string | null;
   notes: string | null;
+  // Optional per-visit vitals (nullable) — feed the risk scorer when present
+  // and the RAG visit chunk text.
+  systolic_bp: number | null;
+  diastolic_bp: number | null;
+  blood_sugar_mmol: number | null;
+  body_temp_c: number | null;
+  heart_rate_bpm: number | null;
   created_at: string;
 }
 
@@ -151,9 +158,9 @@ export interface Hospital {
 
 // A hospital-admin account is scoped to exactly one hospital (hospital_id).
 // It is a peer of doctor auth (same password-hash/session pattern in
-// lib/auth.ts), not a variant of the analytics analyst account — a hospital
-// admin can only ever see/manage doctors within their own hospital_id, and
-// has no visibility into other hospitals, other regions, or patient data.
+// lib/auth.ts) — a hospital admin can only ever see/manage doctors within
+// their own hospital_id, and has no visibility into other hospitals or
+// patient data.
 export interface HospitalAdmin {
   id: string;
   full_name: string;
@@ -335,10 +342,47 @@ export interface PatientRegistration {
 export interface RegistrationAttachment {
   id: string;
   registration_id: string;
+  // Stamped by approvePatientRegistration — until then the uploaded report
+  // belongs to the booking *request*, not to any patient.
+  patient_id: string | null;
   stored_name: string;
   original_name: string;
   mime_type: string;
   size_bytes: number;
+  created_at: string;
+}
+
+// One indexable text chunk in the RAG vector index (lib/rag.ts). Chunks are
+// created against a pending registration at booking time and re-parented to
+// the patient inside the approval transaction.
+export interface RagChunk {
+  id: string;
+  patient_id: string | null;
+  registration_id: string | null;
+  source_type: "profile" | "visit" | "attachment";
+  source_id: string;
+  chunk_index: number;
+  label: string;
+  content: string;
+  // Normalized MiniLM vector as a BLOB, or NULL when the local embedding
+  // model wasn't available at index time (FTS keyword fallback still serves
+  // these; ensurePatientIndexed backfills embeddings opportunistically).
+  embedding: Buffer | null;
+  embedding_model: string | null;
+  created_at: string;
+}
+
+// In-app-only patient notification (no email/SMS — those are separate
+// configured channels). 'report' = an AI-drafted clinical report was saved
+// and sent; 'system' is reserved for future in-app messages.
+export interface Notification {
+  id: string;
+  patient_id: string;
+  type: "report" | "system";
+  title: string;
+  body: string;
+  link: string | null;
+  is_read: number;
   created_at: string;
 }
 

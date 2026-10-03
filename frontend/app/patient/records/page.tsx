@@ -4,6 +4,7 @@ import { serverFetch } from "@/lib/server-api";
 import { PatientHeader } from "@/components/patient/PatientHeader";
 import { Card, Badge, Button, formatDate, recordTypeLabel, recordTypeTone } from "@/components/ui";
 import type { Medication, PatientFullRecord } from "@/lib/types";
+import { ReportSections } from "@/components/report/ReportSections";
 
 export default async function PatientRecordsPage() {
   const full = await serverFetch<PatientFullRecord>("/api/patient/me");
@@ -42,7 +43,7 @@ export default async function PatientRecordsPage() {
                 </div>
                 {r.diagnosis && <p className="font-medium mt-2">{r.diagnosis}</p>}
                 {r.symptoms && <p className="text-sm text-sage mt-1">Symptoms: {r.symptoms}</p>}
-                {r.notes && <p className="text-sm mt-2 leading-relaxed">{r.notes}</p>}
+                {r.notes && <ReportSections notes={r.notes} />}
               </Card>
             </li>
           ))}

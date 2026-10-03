@@ -6,6 +6,7 @@ import { useState } from "react";
 import { PulseMark } from "@/components/PulseMark";
 import { apiUrl, readCsrfCookie } from "@/lib/api";
 import { BottomTabBar } from "@/components/BottomTabBar";
+import { NotificationBell } from "@/components/patient/NotificationBell";
 import { HomeIcon, RecordsIcon, CalendarIcon, ShieldIcon, GridIcon } from "@/components/TabIcons";
 
 const NAV_ITEMS = [
@@ -84,6 +85,9 @@ export function PatientHeader({ patientName }: { patientName: string }) {
           </nav>
         </div>
         <div className="flex items-center gap-3 sm:gap-4 shrink-0">
+          {/* In-app notifications (AI-sent reports, etc.) — badge shows the
+              unread count from the patient's own feed. */}
+          <NotificationBell />
           <span className="text-sm text-sage hidden xl:inline whitespace-nowrap truncate max-w-[160px]">{patientName}</span>
           <button onClick={logout} className="focus-ring hidden xl:inline text-sm font-medium text-sage hover:text-alert whitespace-nowrap">
             Sign out

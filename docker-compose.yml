@@ -16,7 +16,6 @@ services:
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
       DEMO_MODE: ${DEMO_MODE:-false}
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
-      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the analytics service below}
     volumes:
       # Persist the SQLite database across container restarts/rebuilds.
       - pulseid-data:/app/data
@@ -61,72 +60,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  analytics:
-    build:
-      context: ./analytics
-      dockerfile: Dockerfile
-    image: pulseid-analytics:latest
-    container_name: pulseid-analytics
-    restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
-    ports:
-      - "${ANALYTICS_PORT:-3100}:3100"
-    environment:
-      PORT: 3100
-      NODE_ENV: production
-      # Reaches the backend over the Docker network by service name, not
-      # localhost — this is the *server-side* URL, never sent to a browser.
-      API_INTERNAL_URL: http://backend:4000
-      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the backend above}
-      ANALYTICS_SESSION_SECRET: ${ANALYTICS_SESSION_SECRET:?ANALYTICS_SESSION_SECRET must be set — copy analytics/.env.example to .env and set a long random value}
-      # Bootstrap admin account — only used the very first time the app runs
-      # (when no analyst accounts exist yet in analytics.db). After that,
-      # manage accounts from the "Analysts" page and change this password
-      # from "Account settings".
-      ANALYTICS_ADMIN_EMAIL: ${ANALYTICS_ADMIN_EMAIL:?ANALYTICS_ADMIN_EMAIL must be set — bootstrap admin login for the analytics dashboard}
-      ANALYTICS_ADMIN_PASSWORD: ${ANALYTICS_ADMIN_PASSWORD:?ANALYTICS_ADMIN_PASSWORD must be set — bootstrap admin password for the analytics dashboard}
-      # Optional — powers the Ask/Alerts-briefing/Bulletins/Resources AI
-      # features. Set ONE of these two providers; leave both unset and
-      # those pages still work, just without generated text.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
-    volumes:
-      - pulseid-analytics-data:/app/data
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3100/login', r => process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-  analytics-scheduler:
-    build:
-      context: ./analytics
-      dockerfile: Dockerfile.scheduler
-    image: pulseid-analytics-scheduler:latest
-    container_name: pulseid-analytics-scheduler
-    restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
-    environment:
-      API_INTERNAL_URL: http://backend:4000
-      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the backend above}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
-      BULLETIN_WEEKLY_CRON: ${BULLETIN_WEEKLY_CRON:-0 6 * * 1}
-      BULLETIN_MONTHLY_CRON: ${BULLETIN_MONTHLY_CRON:-0 6 1 * *}
-    volumes:
-      # Same data directory as the `analytics` service above, so bulletins
-      # the scheduler writes show up in the dashboard's review queue.
-      - pulseid-analytics-data:/app/data
 
   backend-reminders:
     build:
@@ -194,4 +127,3 @@ services:
 
 volumes:
   pulseid-data:
-  pulseid-analytics-data:

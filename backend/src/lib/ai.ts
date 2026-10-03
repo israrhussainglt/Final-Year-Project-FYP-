@@ -1,9 +1,6 @@
-// Thin wrapper around whichever LLM provider is configured, mirroring the
-// same abstraction the analytics service uses (see analytics/lib/ai.ts) so
-// there's one consistent pattern across both services for picking a
-// provider, timing out, and retrying transient failures. Kept as its own
-// small copy here (rather than a shared package) since this backend and
-// the analytics Next.js app are deployed and versioned independently.
+// Thin wrapper around whichever LLM provider is configured (OpenRouter or
+// Anthropic directly): one consistent code path for picking a provider,
+// timing out, and retrying transient failures.
 //
 // IMPORTANT: every caller in this file must only ever pass already-derived
 // aggregate figures (counts, rates) in the prompt — never patient names,
@@ -160,9 +157,8 @@ Rules you always follow:
 // OPS_SYSTEM_PROMPT above: this one *is* given one patient's own check-in
 // answers, because its output goes only to that patient's own treating
 // doctor (see the followup_agents.doctor_id ownership check in repo.ts and
-// every /api/doctor/followups* route) — never to analytics or any other
-// audience. It must never be reused for a prompt whose output could reach
-// anyone other than that one doctor.
+// every /api/doctor/followups* route). It must never be reused for a prompt
+// whose output could reach anyone other than that one doctor.
 export const FOLLOWUP_SYSTEM_PROMPT = `You are drafting a short clinical note for a doctor inside PulseID, summarizing one patient's answers to a scheduled follow-up check-in (e.g. postpartum, post-operative, or chronic-disease monitoring).
 
 Rules you always follow:

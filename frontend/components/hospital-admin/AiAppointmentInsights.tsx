@@ -4,10 +4,9 @@ import { useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { apiUrl, readCsrfCookie } from "@/lib/api";
 
-// Same loading/error/render lifecycle as analytics' AiSummaryBox, adapted
-// for this backend's POST + CSRF-cookie auth pattern instead of a bare
-// same-origin POST. Only ever asks for a briefing over already-aggregated
-// appointment counts — see the /insights route for what's actually sent.
+// Standard loading/error/render lifecycle for the AI briefing cards. Only
+// ever asks for a briefing over already-aggregated appointment counts —
+// see the /insights route for what's actually sent.
 export function AiAppointmentInsights() {
   const [text, setText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

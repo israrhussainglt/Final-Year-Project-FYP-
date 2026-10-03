@@ -428,7 +428,13 @@ export function BookAppointmentForm() {
           type="file"
           multiple
           accept="application/pdf,image/png,image/jpeg,image/webp"
-          onChange={(e) => addFile(e.target.files)}
+          onChange={(e) => {
+            addFile(e.target.files);
+            // Reset the input so picking the same file again (e.g. right after
+            // removing it from the list) re-fires onChange — otherwise the
+            // browser sees an unchanged value and silently does nothing.
+            e.currentTarget.value = "";
+          }}
           className="focus-ring block w-full text-sm text-sage file:mr-3 file:rounded-lg file:border file:border-line file:bg-white file:px-4 file:py-2.5 file:text-sm file:font-semibold file:text-ink hover:file:border-teal"
         />
         {files.length > 0 && (

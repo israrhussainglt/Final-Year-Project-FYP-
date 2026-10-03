@@ -6,8 +6,8 @@
 // check-in now" trigger, so a scheduled run and a manual one go through
 // the same code path.
 //
-// Next.js auto-loads .env.local in the frontend/analytics apps; this is a
-// plain Node script with no such magic, so load env vars explicitly.
+// Next.js auto-loads .env.local in the frontend app; this is a plain Node
+// script with no such magic, so load env vars explicitly.
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";

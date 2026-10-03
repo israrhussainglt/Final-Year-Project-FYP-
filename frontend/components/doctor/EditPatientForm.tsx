@@ -157,7 +157,7 @@ export function EditPatientForm({ patient }: { patient: Patient }) {
             </Field>
           </div>
 
-          <Field label="Address" hint="Optional — for this patient's record only. It doesn't feed the analytics dashboard, which groups cases by the hospital's city instead of a patient's home address.">
+          <Field label="Address" hint="Optional — for this patient's record only.">
             <input className={inputClass} value={form.address} onChange={(e) => set("address", e.target.value)} />
           </Field>
 

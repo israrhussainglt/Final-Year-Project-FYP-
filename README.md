@@ -6,14 +6,13 @@ readable by a first responder with just a QR scan, with nothing more than
 life-critical facts ever exposed to a stranger. It also installs like a real
 app on your phone or laptop — no app store required.
 
-This repo is split into three independently deployable services, the way a
+This repo is split into two independently deployable services, the way a
 real product ships:
 
 ```
 pulseid/
-├── backend/     Express + TypeScript API — auth, records, appointments, QR, audit log, risk scoring, proactive follow-ups, analytics aggregates
+├── backend/     Express + TypeScript API — auth, records, appointments, QR, audit log, risk scoring, proactive follow-ups
 ├── frontend/    Next.js app (installable PWA) — doctor portal, patient portal, emergency page
-└── analytics/   Next.js app — national/regional public-health dashboard (aggregate counts only)
 ```
 
 ## Why this split
@@ -26,23 +25,14 @@ pulseid/
   page either fetches from the backend at request time (for fast,
   server-rendered pages) or from the browser (for interactive forms), and
   ships zero server secrets other than the shared session-verification key.
-- **`analytics/`** is a separate Next.js app for a completely different
-  audience — a public-health analyst or Ministry-of-Health user, not a
-  doctor or patient. It has its own login and its own session secret, and
-  it never has a path to an individual patient record: it only calls
-  `backend`'s `/api/analytics/*` routes, which return region/time-bucketed
-  counts (with small-cell suppression — see its own README) and nothing
-  with a name or National ID attached.
 
 `frontend` trusts the same `SESSION_SECRET` as `backend` to verify JWT
-session cookies, which is what lets Next.js middleware protect `/doctor/*`
-and `/patient/*` routes without an extra network round-trip on every click,
-while the backend remains the single source of truth that actually issues
-those cookies. `analytics` is deliberately **not** part of that trust
-circle — it authenticates to `backend` with its own service-to-service key
-(`ANALYTICS_SERVICE_KEY`) and has its own independent analyst session, so a
-clinical credential and an analytics credential can never be swapped for
-each other, on purpose.
+session cookies, which is what lets Next.js middleware protect `/doctor/*`,
+`/patient/*` and `/hospital-admin/*` routes without an extra network
+round-trip on every click, while the backend remains the single source of
+truth that actually issues those cookies. Doctor, patient and hospital-admin
+sessions are three separate cookies with three separate role checks, so no
+credential can be swapped for another, on purpose.
 
 ## What's inside
 
@@ -165,8 +155,7 @@ or neither — with neither configured the scheduler just logs what it would
 have sent, so the reminder flow is still visible in dev without real
 credentials. Runs as its own container (`backend/Dockerfile.reminders`,
 the `backend-reminders` service in `docker-compose.yml`) sharing the same
-SQLite volume as the main API, mirroring how `analytics-scheduler` is set
-up for bulletins.
+SQLite volume as the main API.
 
 **Recurring appointments.** When confirming a request, a doctor can tick
 "Repeat for follow-ups" and choose a cadence (weekly/every 2 weeks/monthly)
@@ -256,6 +245,52 @@ Runs as its own container (`backend/Dockerfile.followups`, the
 SQLite volume as the main API — mirroring how `backend-reminders` is set
 up.
 
+### AI-drafted visit reports — RAG over the patient's record, doctor side only
+
+When a doctor adds a visit, they can write bare keywords ("fever 4d, cough,
+?dengue, paracetamol") and click **✦ Draft full report with AI** on that
+visit's timeline card. Retrieval-augmented generation (RAG) then does the
+writing — grounded, structured, and never saved without the doctor:
+
+1. **What's in the index.** Every patient has a chunk index in SQLite
+   (`rag_chunks`): their personal details/profile, every visit with its
+   prescriptions as one chunk, and the text of any PDF reports they uploaded
+   with their booking request (chunks are embedded at booking time and
+   re-parented to the patient inside the approval transaction — the same
+   transaction promotes the uploaded files onto the patient's record).
+2. **Embeddings are local and free.** `backend/src/lib/rag.ts` embeds chunks
+   with `all-MiniLM-L6-v2` running in-process (LangChain `Embeddings`
+   implementation over `@huggingface/transformers`, quantized q8). The model
+   downloads ONCE into `data/models` and never leaves the machine. Vectors
+   are stored as BLOBs in SQLite; retrieval is brute-force cosine over one
+   patient's chunks through a small LangChain `VectorStore` — correct at
+   this scale, and one more thing with zero infrastructure.
+3. **Generation runs on Groq.** The doctor's keywords + the top-5 retrieved
+   chunks go to `openai/gpt-oss-120b` via Groq's OpenAI-compatible API
+   (`ChatOpenAI` pointed at `api.groq.com`, `GROQ_API_KEY` from
+   [console.groq.com](https://console.groq.com); model overridable with
+   `GROQ_MODEL`). A zod schema (`withStructuredOutput`) is what makes every
+   prescription come back **labelled** — name, dosage, frequency, duration,
+   instructions — instead of buried in prose.
+4. **The doctor is the gate.** The draft renders as an editable form
+   (diagnosis, six clinical sections, prescription table). Nothing is saved
+   until the doctor presses **Approve & send to patient** — finalize writes
+   the report onto the visit, stores the prescriptions as structured rows,
+   and sends the patient an **in-app notification** (bell in the patient
+   header, unread badge, one tap to the record). AI questions are not
+   written to the patient's audit log: the draft is part of the visit the
+   doctor is already treating.
+
+Trust boundaries, stated the same way the rest of the app states them:
+retrieval is filtered by `patient_id` at the SQL layer before any text can
+reach a prompt (no cross-patient leak by construction); the grounding prompt
+forbids inventing facts and requires citation labels like `[Visit
+2026-05-02]`; chunks whose PDFs had no extractable text (scans, image
+uploads — no OCR in this build) are skipped rather than hallucinated; and
+every failure degrades — if the embedding model can't load, retrieval falls
+back to SQLite FTS5 keyword search; with no Groq key the button returns a
+plain "not configured" message and every other feature is unaffected.
+
 ### Doctor-only patient editing
 Doctors can open **✎ Edit details** on a patient's file to correct or update
 their phone number, address, blood group, allergies, chronic conditions,
@@ -267,19 +302,12 @@ patient session.
 
 ### Hospital admin console
 A third staff-facing frontend, at `/hospital-admin`, separate from the
-doctor and patient apps (its own login, its own cookie, its own layout) —
-see [Regional hierarchy](#regional-hierarchy-region--hospital--doctor)
-above for the full permission model. Five things live here:
+doctor and patient apps (its own login, its own cookie, its own layout).
+Five things live here:
 
 - **Overview** (`/hospital-admin/overview`) — patient volume, appointment
   load (by status), and per-doctor activity (visits recorded, appointments,
-  last active), scoped to the admin's own hospital. This is the same shape
-  of aggregate the analytics service already computes per-hospital for
-  analysts, just surfaced directly to the hospital that owns the data —
-  and unlike the analytics side, these counts are never small-cell
-  suppressed, since an admin viewing their own hospital's real numbers
-  isn't the cross-hospital re-identification risk that suppression exists
-  to prevent.
+  last active), scoped to the admin's own hospital.
 - **Doctor accounts** (`/hospital-admin/dashboard`) — add a doctor one at a
   time, edit their specialization inline, deactivate/reactivate.
   `hospital_id` always comes from the admin's own session server-side, so
@@ -358,125 +386,6 @@ available whether you're in a plain browser tab or the installed app — and
 the choice is remembered in `localStorage`. Installed launches default to
 the app launcher; browser tabs default to the website.
 
-### Analytics — national/regional dashboard, aggregate-only
-A third, separate app for a different kind of user entirely: a public-health
-analyst who needs to know *"which region has how many cases of what"*, not
-*"what is patient X's medical history."* It has its own password-gated
-login (`analytics/`), its own session cookie, and it only ever talks to
-`backend`'s `/api/analytics/*` routes over a shared service key — there is
-no route it can call, and no route the backend exposes to it, that returns
-a patient's name, National ID, or individual record.
-
-What it shows:
-- **Overview** — national totals (visits, patients, hospitals, active
-  regions) plus the busiest regions and most common diagnoses nationwide.
-- **Regions** — one row per hospital city (visit volume, distinct patients
-  seen, top condition), each with a hospital-level drill-down underneath
-  (every hospital in that region, its doctor count, and its own visit/patient
-  counts) — see "Regional hierarchy" below for how this rolls up.
-- **Map** — a Leaflet map, circles sized/colored by regional case volume.
-- **Trends** — pick a diagnosis (and optionally a region), see case counts
-  over time with a toggleable forecast overlay (a simple linear
-  projection) — the view built for spotting an outbreak forming before
-  it's obvious in raw numbers.
-- **Benchmark** — one region's share of visits per condition vs that
-  condition's share nationwide, to see what a region sees disproportionately more of.
-- **Alerts** — regions/conditions running well above their own recent
-  baseline, flagged by a simple, explainable ratio — not a black-box model.
-- **Ask** — a natural-language question box, answered by an LLM that only
-  ever sees the same aggregate JSON every other tab already shows.
-- **Bulletins** — the flagship feature: a scheduled job
-  (`analytics/scripts/scheduler.ts`) generates a weekly/monthly
-  epidemiological bulletin — AI-drafted narrative plus four real charts
-  (national trend, busiest regions, top conditions, alert magnitude) —
-  and it sits in a review queue as `pending_review` until an analyst
-  explicitly approves or rejects it. Nothing auto-publishes. A manual
-  "Generate now" button on the page uses the identical code path for
-  on-demand bulletins.
-- **Resources** — AI-drafted "worth a closer look" suggestions, cross-
-  referencing visit load, alerts, and reporting gaps — framed as pointers
-  for a human planner, never as decisions.
-- **Data quality** — flags regions whose reporting volume dropped or spiked
-  sharply, since that's usually a broken pipeline, not real disease change.
-
-The four AI-powered tabs (Ask, Alerts, Bulletins, Resources) go through
-`analytics/lib/ai.ts`, which supports **OpenRouter** (`OPENROUTER_API_KEY`,
-used automatically if set — lets you pick from many underlying models
-through one key) or **Anthropic direct** (`ANTHROPIC_API_KEY`) as a
-fallback. Either way, every AI feature is a pure *writer over
-already-computed aggregate data* — the model never generates a number
-itself (every percentage/count in a bulletin was computed in
-`backend/src/lib/repo.ts` first) — and each degrades to a plain "not
-configured" message if neither key is set, rather than breaking the page.
-
-Bulletins are stored in analytics' own small SQLite database
-(`analytics/lib/bulletin-db.ts`), completely separate from the backend's
-patient-record database — it only ever holds generated narrative text, a
-chart-data snapshot, and a review status.
-
-Every count under 5 is shown as `<5` instead of an exact figure
-(`MIN_CELL_SIZE` in `backend/src/lib/repo.ts`) — standard small-cell
-suppression, the same principle public-health agencies use, so a rare
-diagnosis in a small region can never be combined with location to
-re-identify one person. See `analytics/README.md` for the full trust-model
-writeup and feature-by-feature detail.
-
-## Regional hierarchy: region → hospital → doctor
-
-Patient data organizes around a three-level hierarchy: a **region** (one of
-Pakistan's provinces, plus Gilgit-Baltistan, Azad Jammu & Kashmir, and the
-Islamabad Capital Territory) contains **hospitals**, and each hospital
-contains **doctors**. This has always existed at the database level
-(`hospitals.province`/`hospitals.city`, `doctors.hospital_id`) — what this
-section documents is the login/permission layer built on top of it, and how
-analytics rolls counts up through all three levels rather than skipping
-straight from region to doctor.
-
-```
-Gilgit-Baltistan
-├── DHQ Gilgit                          (hospital-admin login)
-│   ├── Dr. Amina Baig — Child Specialist       (doctor login)
-│   └── Dr. Karim Hunzai — General Medicine     (doctor login)
-└── Skardu Civil Hospital               (hospital-admin login)
-    ├── Dr. Fatima Sheikh — General Medicine    (doctor login)
-    └── Dr. Zubair Baltistani — Cardiologist    (doctor login)
-
-Punjab
-└── Lahore General Hospital             (hospital-admin login)
-    ├── Dr. Ayesha Raza — Internal Medicine     (doctor login)
-    └── Dr. Bilal Ahmed — Emergency Medicine    (doctor login)
-
-Sindh
-└── Karachi Civic Hospital              (hospital-admin login)
-    ├── Dr. Sana Iqbal — General Medicine       (doctor login)
-    ├── Dr. Omar Farooqi — Cardiologist         (doctor login)
-    └── Dr. Rabia Yousuf — Child Specialist     (doctor login)
-
-Khyber Pakhtunkhwa
-└── Peshawar City Hospital              (hospital-admin login)
-    ├── Dr. Nadia Khattak — General Medicine        (doctor login)
-    └── Dr. Adeel Yousafzai — Orthopedic Surgeon     (doctor login)
-
-Balochistan
-└── Quetta Regional Hospital            (hospital-admin login)
-    ├── Dr. Bilal Marri — General Medicine       (doctor login)
-    └── Dr. Mahnoor Achakzai — Gynecologist      (doctor login)
-
-Islamabad Capital Territory
-└── Islamabad Capital Hospital          (hospital-admin login)
-    ├── Dr. Usman Farooq — General Medicine      (doctor login)
-    └── Dr. Hira Abbasi — Dermatologist          (doctor login)
-
-Azad Jammu & Kashmir
-└── Muzaffarabad General Hospital       (hospital-admin login)
-    ├── Dr. Faiza Chaudhry — General Medicine    (doctor login)
-    └── Dr. Waqas Mughal — Child Specialist      (doctor login)
-```
-
-Every hospital in the seed data has its own hospital-admin login, entirely
-separate from any of its doctors' logins — DHQ Gilgit's admin account is not
-Skardu Civil Hospital's, and neither is Lahore General's.
-
 ### Who can log in, and what they can see/do
 
 | Account | Logs in via | Scope |
@@ -484,14 +393,13 @@ Skardu Civil Hospital's, and neither is Lahore General's.
 | **Patient** | National ID + OTP (unchanged by this feature) | Their own record, dependents, and appointments only. |
 | **Doctor** | `POST /api/auth/doctor/login` (email + password) | Their own patients/appointments only, exactly as before. Belongs to exactly one hospital (`doctors.hospital_id`), but has no admin capability over that hospital. |
 | **Hospital admin** | `POST /api/auth/hospital-admin/login` (email + password) | Doctors: only the ones at their own hospital (`hospital_admins.hospital_id`) — list, create, edit specialization, deactivate/reactivate, all scoped server-side to their own `hospital_id` from the signed session, never a request parameter. **Cannot** see or touch another hospital's doctors, and cannot transfer a doctor between hospitals (`hospital_id` isn't accepted as writable input on any hospital-admin route). Patients: can search and fix registration/demographic fields (name, DOB, contact info, blood group, allergies-on-file, etc.) via the same validation as a doctor's edit — but **cannot** see medical history, diagnoses, prescriptions, or the clinical audit trail; that surface is doctor-only, both in the API and the UI. |
-| **Analytics analyst** | Analytics app's own login (unchanged — admin/viewer, national scope) | Every region and every hospital, combined, as aggregate counts only — never a name, National ID, or individual record. |
 
 Hospital-admin sessions use the exact same mechanics as doctor sessions
 (bcrypt password hashing, a signed JWT in an `httpOnly` cookie, the same
 CSRF double-submit-cookie protection) — see `backend/src/lib/auth.ts`. It's
 implemented as a peer of doctor auth (its own cookie,
 `pulseid_hospital_admin_session`, and its own session type,
-`HospitalAdminSession`), not layered on top of it or the analyst pattern.
+`HospitalAdminSession`), never layered on top of it.
 
 Deactivating a doctor (`POST /api/hospital-admin/doctors/:id/deactivate`)
 never deletes them — their historical records, prescriptions, and
@@ -499,7 +407,7 @@ appointments stay exactly as they were. It just blocks future logins
 (`findDoctorByEmail` only matches active doctors) and removes them from the
 patient-facing "choose a doctor" picker (`listDoctorsForBooking`).
 
-### Seeding the database with this structure
+### Seeding the database
 
 ```bash
 cd backend
@@ -508,79 +416,40 @@ npm run seed              # first run only seeds if the DB is empty
 node scripts/seed.js --force
 ```
 
-This creates all 8 hospitals shown in the tree above — one per region, with
-two in Gilgit-Baltistan (DHQ Gilgit + Skardu Civil Hospital) as the worked
-example — each with 2–3 doctors across different specializations (never an
-empty hospital), plus one hospital-admin account per hospital. The seed
-script prints every generated hospital-admin email/password to the console
-right after the existing doctor/patient credential printout, e.g.:
+The seed creates Lahore General Hospital with its two demo doctors
+(Internal Medicine + Emergency Medicine), one hospital-admin account for
+that hospital, and the demo patient cast. The seed script prints every
+generated login to the console:
 
 ```
+[seed] Database ready at data/pulseid.db
+[seed] Demo doctor login: ayesha.raza@pulseid.dev / doctor123
+[seed] Demo patient login (National ID + any 6-digit OTP shown on screen):
+  - Hassan Tariq: 35202-1234567-1 (password fallback: patient123)
 [seed] Hospital-admin logins (one per hospital, password same for every admin in this demo seed):
   - Lahore General Hospital: admin.lahoregeneral@pulseid.dev / hospitaladmin123 (Zainab Malik)
-  - DHQ Gilgit: admin.dhqgilgit@pulseid.dev / hospitaladmin123 (Rahat Karim)
-  - Skardu Civil Hospital: admin.skarducivil@pulseid.dev / hospitaladmin123 (Bilal Skardu)
-  ...
 ```
-(Full list is 8 lines, one per hospital — check your terminal output after
-seeding for the exact set, since re-running with `--force` regenerates IDs
-but keeps the same emails/hospitals.)
 
-If you're upgrading an existing database that predates this feature (no
-`hospital_admins` table, no `doctors.is_active` column), no manual migration
-step is needed — `backend/src/lib/db.ts` adds both automatically the next
-time the backend starts, defaulting every existing doctor to active.
-
-### How analytics rolls this up
-
-Every analytics aggregate (`backend/src/lib/repo.ts`, the section below
-`Analytics — national/regional aggregates`) is built by joining
-`medical_records → doctors → hospitals`, so a visit's region always comes
-from the hospital where it was recorded — the full chain, not a
-region-to-doctor shortcut. On top of the existing province/city rollups
-(`getProvinceSummary`, `getRegionSummary`), `getHospitalSummary(region?)`
-adds the hospital-level layer: for each hospital, its region/province, its
-doctor count, and its visit/patient counts — exposed at
-`GET /api/analytics/hospitals?region=<city>` and surfaced in the analytics
-dashboard as a drill-down under each region row on the **Regions** page
-(`analytics/app/dashboard/regions/page.tsx`).
-
-The same small-cell suppression rule applies at every level: any count below
-`MIN_CELL_SIZE` (5) is returned as `null` with `suppressed: true` instead of
-an exact number, rendered as `<5` by `SuppressedValue` — this stops someone
-from combining a hospital + a rare diagnosis to re-identify a specific
-patient, the same principle used at the region/province level.
-
-Empty sets are handled defensively at every level:
-- A **region with zero hospitals** — `getHospitalSummary(region)` simply
-  returns an empty array (a `LEFT JOIN` starting from `hospitals`, so a
-  region that has no hospital rows produces no output rows, never an error).
-  The dashboard renders "No hospitals on file for this region." instead of
-  an empty or broken table.
-- A **hospital with zero visits** — still gets a row: `COUNT(m.id)` over a
-  `LEFT JOIN` to `medical_records` with no matches is exactly `0`, which
-  `suppress()` renders the same way as any other small cell (`<5`) rather
-  than dividing by zero or omitting the hospital.
-- Every share/percentage calculation elsewhere in `repo.ts`
-  (`getRegionBenchmark`, `getDataQualityReport`, etc.) already guards its
-  denominator (`totalRegionVisits > 0 ? … : null`), so a region with no
-  visits yet renders `—` instead of `NaN` or a crash.
+If you're upgrading an existing database that predates the hospital-admin
+feature (no `hospital_admins` table, no `doctors.is_active` column), no
+manual migration step is needed — `backend/src/lib/db.ts` adds both
+automatically the next time the backend starts, defaulting every existing
+doctor to active.
 
 ## Running it locally
 
-You'll need three terminals: backend, frontend, and (optionally) analytics.
+You'll need two terminals: backend and frontend.
 
 ### 1. Backend
 
 ```bash
 cd backend
-cp .env.example .env      # edit SESSION_SECRET to any long random string,
-                           # and ANALYTICS_SERVICE_KEY if you'll run analytics too
+cp .env.example .env      # edit SESSION_SECRET to any long random string
 npm install
 npm run dev                # seeds the demo database on first run, then starts on :4000
 ```
 
-Optionally, in a fourth terminal, run the appointment reminder sweep
+Optionally, in a spare terminal, run the appointment reminder sweep
 (without SMTP/Twilio configured it just logs what it would send — see
 [Sending real OTP codes by SMS](#sending-real-otp-codes-by-sms) above for
 setting those up for real):
@@ -591,7 +460,7 @@ npm run reminders                    # runs on a schedule (every 15 min by defau
 npm run reminders -- --run-now       # or fire a sweep immediately, for testing
 ```
 
-Similarly, in a fifth terminal, run the proactive follow-up sweep (see
+Similarly, in another spare terminal, run the proactive follow-up sweep (see
 [Proactive follow-ups](#proactive-follow-ups--scheduled-check-ins-for-high-risk-patients)
 above):
 
@@ -614,36 +483,9 @@ Open **http://localhost:3000**. To try it as an installed app, open it in
 Chrome/Edge and use the install icon in the address bar (or the browser
 menu → "Install PulseID…" / "Add to Home Screen" on mobile).
 
-### 3. Analytics (optional)
-
-```bash
-cd analytics
-cp .env.example .env # ANALYTICS_SERVICE_KEY must match the backend's exactly;
-                            # set ANALYTICS_ADMIN_EMAIL/ANALYTICS_ADMIN_PASSWORD to
-                            # bootstrap your first (admin) analyst account — add more
-                            # named accounts later from the "Analysts" page;
-                            # set ANTHROPIC_API_KEY to enable the AI tabs (Ask, Alerts
-                            # briefing, Reports, Resources) — optional, everything else
-                            # works without it
-npm install
-npm run dev                 # starts on :3100
-```
-
-Open **http://localhost:3100** and sign in with `ANALYTICS_ADMIN_EMAIL` /
-`ANALYTICS_ADMIN_PASSWORD` (the login form pre-fills the default demo values
-— `admin@health.gov` / `change-this-password` — so you can just hit Sign in).
-See `analytics/README.md` for more on how it's isolated from the
-doctor/patient side, and its own README section on per-analyst accounts,
-roles, and the audit log.
-
-> **Note:** `.env`/`.env.local` files are only read once, at process
-> startup. If you edit `backend/.env` or `analytics/.env.local` (e.g. to
-> change `ANALYTICS_SERVICE_KEY`) while `npm run dev` is already running,
-> restart that process — otherwise the analytics dashboard will fail with
-> `503 Analytics API is not configured.` even though the file looks correct.
-> Also remember `ANALYTICS_SERVICE_KEY` must be byte-for-byte identical in
-> both `backend/.env` and `analytics/.env.local`, or every `/api/analytics/*`
-> call gets a `401` instead.
+> **Note:** `.env` files are only read once, at process startup. If you
+> edit `backend/.env` or `frontend/.env` while `npm run dev` is already
+> running, restart that process for the change to take effect.
 
 ### Backend in Docker (recommended for anything beyond local dev)
 
@@ -653,11 +495,8 @@ for its SQLite data — the frontend still runs separately with `npm run dev`
 or your own hosting.
 
 ```bash
-cp .env.example .env      # set SESSION_SECRET, ANALYTICS_SERVICE_KEY,
-                           # ANALYTICS_SESSION_SECRET, ANALYTICS_ADMIN_EMAIL,
-                           # ANALYTICS_ADMIN_PASSWORD
-                           # (all via `openssl rand -hex 32` except the email/password),
-                           # and CORS_ORIGIN
+cp .env.example .env      # set SESSION_SECRET (a long random value) and
+                           # CORS_ORIGIN
 docker compose up --build -d
 ```
 
@@ -671,13 +510,8 @@ survives rebuilds and restarts. It also starts `backend-reminders` (no
 exposed port — sweeps for appointment reminders every 15 minutes in the
 background, sharing the same `pulseid-data` volume as the API) and
 `backend-followups` (no exposed port — sweeps for due proactive follow-up
-check-ins hourly, also sharing `pulseid-data`), and builds and starts
-`analytics` (on `http://localhost:3100`, override with
-`ANALYTICS_PORT`) and `analytics-scheduler` (no exposed port — it just runs
-the weekly/monthly bulletin cron in the background), both waiting for the
-backend's healthcheck before starting. `analytics` and
-`analytics-scheduler` share a `pulseid-analytics-data` volume, so bulletins
-the scheduler generates show up in the dashboard's review queue.
+check-ins hourly, also sharing `pulseid-data`), both waiting for the
+backend's healthcheck before starting.
 
 Useful commands:
 
@@ -685,17 +519,13 @@ Useful commands:
 docker compose logs -f backend               # tail backend logs
 docker compose logs -f backend-reminders     # tail reminder-sweep logs
 docker compose logs -f backend-followups     # tail follow-up-sweep logs
-docker compose logs -f analytics             # tail analytics web logs
-docker compose logs -f analytics-scheduler   # tail scheduler logs (bulletin generation runs)
 docker compose exec backend node scripts/seed.js --force   # reset + reseed demo data
 docker compose down                # stop (keeps the data volumes)
 docker compose down -v             # stop AND delete the data volumes
 ```
 
 Point the frontend at it by setting `NEXT_PUBLIC_API_URL=http://localhost:4000`
-in `frontend/.env.local` (or your production API domain). The analytics
-service is configured entirely through `docker-compose.yml`/`.env` when run
-this way — it doesn't need its own `.env.local` in the Docker path.
+in `frontend/.env.local` (or your production API domain).
 
 ### Demo logins
 
@@ -704,9 +534,8 @@ The seed script prints these to your terminal, but for convenience:
 | Role    | Credential                                    |
 | ------- | ---------------------------------------------- |
 | Doctor  | `ayesha.raza@pulseid.dev` / `doctor123`        |
-| Hospital admin | `admin.lahoregeneral@pulseid.dev` / `hospitaladmin123` (see the "Regional hierarchy" section above for the full list of 8) |
+| Hospital admin | `admin.lahoregeneral@pulseid.dev` / `hospitaladmin123` |
 | Patient | National ID `35202-1234567-1` (OTP shown on screen after "Send code") |
-| Analytics (optional service) | `admin@health.gov` / `change-this-password` — pre-filled on the login form, from `ANALYTICS_ADMIN_EMAIL`/`ANALYTICS_ADMIN_PASSWORD` in `analytics/.env.local` |
 
 ## Deploying it for real
 
@@ -734,15 +563,6 @@ The seed script prints these to your terminal, but for convenience:
 - If you change the app icons, update both `frontend/public/icon-*.png`
   *and* `frontend/public/site.webmanifest` — the manifest is what installers
   actually read.
-- Deploy `analytics/` (`npm run build && npm run start`, or its own
-  `Dockerfile`) anywhere Next.js runs — it does not need to share a domain,
-  cookie, or host with `frontend/`, since it has no shared session with it.
-  Set `API_INTERNAL_URL` to the backend's URL reachable from analytics'
-  server, and make sure `ANALYTICS_SERVICE_KEY` matches the backend exactly.
-  Put this behind its own access control at the network level too (VPN,
-  IP allowlist, or SSO in front of it) if it's holding data for a real
-  ministry-of-health rollout — the built-in single shared password is meant
-  for a small trusted group, not open internet access.
 
 ## Scaling this up (SQLite → production database)
 
@@ -752,14 +572,7 @@ a country needs a database built for concurrent writers, replication, and
 backups. The intended path: swap `better-sqlite3` for `pg` (or an ORM like
 Drizzle/Prisma) inside `backend/src/lib/db.ts` and `lib/repo.ts` — those two
 files are the only place the rest of the codebase talks to the database, by
-design. Once on Postgres:
-- Point the analytics service's queries at a **read replica**, not the
-  primary, so a dashboard query can never compete with a doctor saving a
-  record.
-- Consider moving the heaviest analytics aggregates (`getRegionSummary`,
-  `getRegionConditionMatrix` in `lib/repo.ts`) out of live query time
-  entirely and into a nightly or streaming rollup table — the routes in
-  `server.ts` wouldn't need to change, only what they read from.
+design.
 
 ## Sending real OTP codes by SMS
 
@@ -796,9 +609,13 @@ left that way in production.
 
 ## Tests
 
-The backend has a small `vitest` suite covering the OTP lifecycle — issuing,
-verifying, expiry, wrong-code lockout, and the daily send cap — since that's
-the code path gating patient login. Run it from `backend/`:
+The backend has a `vitest` suite covering the OTP lifecycle (issuing,
+verifying, expiry, wrong-code lockout, the daily send cap — the code path
+gating patient login), the self-service booking workflow (approval
+transaction, duplicate-pending guard, ownership scoping, attachment purge),
+and the RAG report flow's persistence layer (vector math, chunk builders,
+patient scoping, FTS fallback, chunk re-parenting at approval, notification
+ownership). Run it from `backend/`:
 
 ```bash
 npm test
@@ -879,24 +696,6 @@ on every push and PR.
   codes at a domain they control.
 - A repo-root `.gitignore` keeps `.env` files, `node_modules`, the SQLite
   `data/` directory, and build output out of version control.
-- The analytics service is a fully separate trust boundary: it authenticates
-  to the backend with a service-to-service key (`ANALYTICS_SERVICE_KEY`),
-  never a doctor/patient session, and every route it can call returns
-  aggregate counts only — small-cell-suppressed below 5 — never a name,
-  National ID, or individual record. It has its own login and session
-  secret (`ANALYTICS_SESSION_SECRET`), so an analytics credential and a
-  clinical credential can never be swapped for each other, by design.
-- `backend`'s `/api/analytics/*` routes refuse every request (503) if
-  `ANALYTICS_SERVICE_KEY` isn't set, rather than silently running open.
-- The analytics app uses named, bcrypt-hashed analyst accounts (admin or
-  viewer role) instead of a single shared password — every bulletin
-  approval, AI query, CSV export, and account change is written to that
-  app's own audit log with the analyst's identity attached, and admin-only
-  actions (approving bulletins, managing analyst accounts, reading the
-  audit log) are enforced in the route handler itself, not just hidden in
-  the nav. Its login route is rate-limited per IP, and AI queries are
-  rate-limited per analyst since each one costs real money against the
-  configured provider.
 
 ## Project structure at a glance
 
@@ -922,6 +721,9 @@ backend/
 │       ├── followup-agent.ts  Proactive follow-up sweep, rule-based
 │       │                       check-in risk flagging, default question
 │       │                       templates per pathology
+│       ├── rag.ts        LangChain RAG for AI-drafted reports: local
+│       │                       MiniLM embeddings + SQLite vectors + FTS
+│       │                       fallback, Groq structured-output drafting
 │       └── ai.ts         OpenRouter/Anthropic wrapper for the hospital-admin
 │                          appointment-insights briefing and follow-up
 │                          check-in summaries, degrades gracefully
@@ -948,36 +750,6 @@ frontend/
 │   ├── offline.html        Offline fallback page
 │   └── site.webmanifest    PWA manifest (icons, name, install shortcuts)
 └── middleware.ts          Verifies the session cookie, guards protected routes
-
-analytics/
-├── app/
-│   ├── login/              Password-gated analyst login
-│   ├── api/
-│   │   ├── login, logout    Session issuing/clearing
-│   │   ├── trends, forecast Same-origin proxies for TrendExplorer
-│   │   ├── query             AI: natural-language question → aggregate-only answer
-│   │   ├── alerts/narrate    AI: plain-language briefing over active alerts
-│   │   ├── bulletins         List/generate weekly+monthly bulletins (AI + charts)
-│   │   ├── bulletins/[id]/review  Approve/reject a pending bulletin
-│   │   └── resources/suggest AI: "worth a look" suggestions, never decisions
-│   └── dashboard/          Overview, Regions, Map, Trends, Benchmark, Alerts,
-│                            Query, Reports (Bulletins UI), Resources, Quality
-├── components/            Nav, KPI cards, suppressed-value display, TrendExplorer,
-│                           RegionMap (Leaflet), BulletinCharts, AiSummaryBox,
-│                           QueryBox, shared ui.tsx
-├── scripts/
-│   └── scheduler.ts        Standalone cron process — generates bulletins on a
-│                            schedule via the same code the manual button uses
-├── lib/
-│   ├── api.ts               Backend aggregate-data client (used by app + scheduler)
-│   ├── ai.ts                 OpenRouter/Anthropic wrapper, degrades gracefully
-│   ├── auth.ts               Analyst session signing/verification
-│   ├── bulletin-db.ts         Analytics' own SQLite store for generated bulletins
-│   ├── bulletin-generator.ts  Shared "gather data → ask AI → store" bulletin logic
-│   └── geo.ts                 City → lat/lng lookup for the Map tab
-├── Dockerfile               The web app (build + serve)
-├── Dockerfile.scheduler     Just runs scripts/scheduler.ts, no HTTP server
-└── middleware.ts           Guards every route except /login and /api/login
 ```
 
 ## Built for the hackathon, built to actually be used
@@ -988,5 +760,4 @@ a full access-transparency log, and honest offline behavior aren't hackathon
 decoration — they're what it actually takes for people to trust a system
 that holds their medical history. That was the goal here: not just a demo
 that works on stage, but a codebase that's honest about what a real
-medical-records product needs — including, now, a way to see the shape of
-the nation's health data without ever exposing the people behind it.
+medical-records product needs.

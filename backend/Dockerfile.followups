@@ -4,7 +4,7 @@
 # scheduler (scripts/followup-scheduler.ts) as a long-lived process — no
 # Express server, since it never serves HTTP. Shares the same source, deps,
 # and SQLite data volume as the main backend image; only the entrypoint
-# differs (mirrors Dockerfile.reminders and analytics/Dockerfile.scheduler).
+# differs (mirrors Dockerfile.reminders).
 
 FROM node:20-alpine
 WORKDIR /app

@@ -8,6 +8,7 @@ export type LandingCopy = {
   navAdmin: string;
   navPatient: string;
   navEmergency: string;
+  navAriaLabel: string;
   heroTitlePre: string;
   heroTitleHighlight: string;
   heroTitlePost: string;
@@ -64,6 +65,7 @@ export const landingCopy: Record<Lang, LandingCopy> = {
     navAdmin: "Hospital admin",
     navPatient: "My Reports",
     navEmergency: "Emergency Scan",
+    navAriaLabel: "Portals",
     heroTitlePre: "One ",
     heroTitleHighlight: "National ID.",
     heroTitlePost: " A lifelong medical record.",
@@ -156,6 +158,7 @@ export const landingCopy: Record<Lang, LandingCopy> = {
     navAdmin: "ہسپتال ایڈمن",
     navPatient: "میری رپورٹس",
     navEmergency: "ایمرجنسی اسکین",
+    navAriaLabel: "پورٹلز",
     heroTitlePre: "ایک ",
     heroTitleHighlight: "قومی شناختی کارڈ۔",
     heroTitlePost: " ایک تاحیات طبی ریکارڈ۔",

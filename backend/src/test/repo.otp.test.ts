@@ -60,8 +60,19 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  // Best-effort: on Windows the sqlite handle can outlive the suite by a tick
+  // and lock the file — a failed cleanup shouldn't fail the tests themselves.
+  try {
+    getDb().close();
+  } catch {
+    /* already closed */
+  }
   for (const ext of ["", "-wal", "-shm"]) {
-    if (fs.existsSync(TEST_DB_PATH + ext)) fs.rmSync(TEST_DB_PATH + ext);
+    try {
+      if (fs.existsSync(TEST_DB_PATH + ext)) fs.rmSync(TEST_DB_PATH + ext);
+    } catch {
+      /* locked or already gone */
+    }
   }
 });
 

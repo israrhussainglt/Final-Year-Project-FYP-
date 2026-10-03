@@ -130,6 +130,18 @@ a:active,
   font-size: 0.6875rem;
 }
 
+/* Hides the scrollbar on horizontally-scrollable strips (the landing
+   header's portal bar) while keeping every scroll input working — touch,
+   trackpad, shift+wheel and keyboard focus all still scroll it. The pill
+   affordance itself signals that the strip extends past the edge. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Print styles for the detailed Medical Report (patient + doctor views). */
 /* ---------------------------------------------------------------------- */

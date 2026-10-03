@@ -10,36 +10,33 @@ One sentence: **one National ID, one lifelong medical record, four surfaces buil
 | **Doctor dashboard** | Clinicians | Full record of any patient they look up — diagnoses, prescriptions, visit history |
 | **Hospital admin** | Hospital administrators | Their hospital's doctors, appointments, oversight — not patient medical detail |
 | **Emergency scan** | Anyone (no login) | Blood group, allergies, chronic conditions, emergency contacts — **nothing else** |
-| **Analytics** | Public-health analysts | De-identified, aggregated population data — never a named patient's record |
 
-The emergency scan and analytics rows are the two that matter most architecturally, because they're the two places PulseID deliberately shows *less* than it could:
+The emergency scan is the row that matters most architecturally, because
+it's the place PulseID deliberately shows *less* than it could:
 
 - The emergency page returns only life-critical fields, scoped at the API layer, not hidden in the UI — a first responder or a stranger scanning a printed card can never pull diagnoses or visit history through it, even by guessing a URL.
-- Analytics never touches patient-identifiable data. It's a fully separate service with its own database, its own login system, and its own secret (`ANALYTICS_SESSION_SECRET`, distinct from the patient/doctor `SESSION_SECRET`). It reaches the backend only over Docker's internal network, authenticated with a service-to-service key (`ANALYTICS_SERVICE_KEY`) that's never exposed to a browser.
 
 ## Services
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌──────────────┐
-│  frontend   │────▶│   backend   │◀────│  analytics   │
-│  (Next.js)  │     │  (Express)  │     │  (Next.js)   │
-│  :3000      │     │  :4000      │     │  :3100       │
-└─────────────┘     └──────┬──────┘     └───────┬──────┘
-                            │                    │
-                     ┌──────▼──────┐    ┌────────▼────────┐
-                     │ pulseid.db  │    │  analytics.db    │
-                     │  (SQLite)   │    │   (SQLite)       │
-                     └─────────────┘    └──────────────────┘
+┌─────────────┐     ┌─────────────┐
+│  frontend   │────▶│   backend   │
+│  (Next.js)  │     │  (Express)  │
+│  :3000      │     │  :4000      │
+└─────────────┘     └──────┬──────┘
+                           │
+                    ┌──────▼──────┐
+                    │ pulseid.db  │
+                    │  (SQLite)   │
+                    └─────────────┘
 
-Also running: backend-reminders (appointment SMS/email), backend-followups
-(proactive follow-up check-in prompts) and analytics-scheduler
-(weekly/monthly public-health bulletins) — all background workers, no
-public port.
+Also running: backend-reminders (appointment SMS/email) and
+backend-followups (proactive follow-up check-in prompts) — background
+workers, no public port.
 ```
 
 - **frontend** — the patient, doctor, hospital-admin, and emergency-scan UIs live in one Next.js app, gated by role-based auth and route, not by separate deployments. A patient and a doctor never share a session, but they do share infrastructure — one thing to build, test, and deploy.
 - **backend** — the single source of truth. Owns auth for patients, doctors, and hospital admins; owns the emergency-scan scoping logic; owns the rotating-QR anti-replay mechanism; owns the rule-based vitals risk scorer and the proactive follow-up check-in sweep.
-- **analytics** — intentionally a separate app, separate database, separate login. This is the trust-boundary decision worth explaining out loud: population-health reporting and a named patient's chart should never be one query away from each other, even internally.
 
 ## Two features worth knowing cold
 
