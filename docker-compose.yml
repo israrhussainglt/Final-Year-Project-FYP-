@@ -1,0 +1,197 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: pulseid-backend:latest
+    container_name: pulseid-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set — copy backend/.env.example to .env and set a long random value}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the analytics service below}
+    volumes:
+      # Persist the SQLite database across container restarts/rebuilds.
+      - pulseid-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/api/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the client bundle at build time — must be reachable
+        # from the *browser*, not just from inside the Docker network,
+        # so it defaults to localhost rather than the "backend" service name.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    image: pulseid-frontend:latest
+    container_name: pulseid-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      # MUST be identical to the backend's SESSION_SECRET above — the
+      # frontend's middleware.ts uses this to verify (never sign) the
+      # session JWT the backend issues. Without it, frontend/lib/auth.ts
+      # silently falls back to a hardcoded dev default, which won't match
+      # the backend's real secret: login will appear to succeed (the
+      # backend sets the cookie fine) but every protected page redirects
+      # straight back to the login screen because middleware can't verify
+      # the cookie it just got.
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set — copy backend/.env.example to .env and set a long random value}
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/', r => process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  analytics:
+    build:
+      context: ./analytics
+      dockerfile: Dockerfile
+    image: pulseid-analytics:latest
+    container_name: pulseid-analytics
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${ANALYTICS_PORT:-3100}:3100"
+    environment:
+      PORT: 3100
+      NODE_ENV: production
+      # Reaches the backend over the Docker network by service name, not
+      # localhost — this is the *server-side* URL, never sent to a browser.
+      API_INTERNAL_URL: http://backend:4000
+      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the backend above}
+      ANALYTICS_SESSION_SECRET: ${ANALYTICS_SESSION_SECRET:?ANALYTICS_SESSION_SECRET must be set — copy analytics/.env.example to .env and set a long random value}
+      # Bootstrap admin account — only used the very first time the app runs
+      # (when no analyst accounts exist yet in analytics.db). After that,
+      # manage accounts from the "Analysts" page and change this password
+      # from "Account settings".
+      ANALYTICS_ADMIN_EMAIL: ${ANALYTICS_ADMIN_EMAIL:?ANALYTICS_ADMIN_EMAIL must be set — bootstrap admin login for the analytics dashboard}
+      ANALYTICS_ADMIN_PASSWORD: ${ANALYTICS_ADMIN_PASSWORD:?ANALYTICS_ADMIN_PASSWORD must be set — bootstrap admin password for the analytics dashboard}
+      # Optional — powers the Ask/Alerts-briefing/Bulletins/Resources AI
+      # features. Set ONE of these two providers; leave both unset and
+      # those pages still work, just without generated text.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+    volumes:
+      - pulseid-analytics-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3100/login', r => process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  analytics-scheduler:
+    build:
+      context: ./analytics
+      dockerfile: Dockerfile.scheduler
+    image: pulseid-analytics-scheduler:latest
+    container_name: pulseid-analytics-scheduler
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_INTERNAL_URL: http://backend:4000
+      ANALYTICS_SERVICE_KEY: ${ANALYTICS_SERVICE_KEY:?ANALYTICS_SERVICE_KEY must be set — shared with the backend above}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      BULLETIN_WEEKLY_CRON: ${BULLETIN_WEEKLY_CRON:-0 6 * * 1}
+      BULLETIN_MONTHLY_CRON: ${BULLETIN_MONTHLY_CRON:-0 6 1 * *}
+    volumes:
+      # Same data directory as the `analytics` service above, so bulletins
+      # the scheduler writes show up in the dashboard's review queue.
+      - pulseid-analytics-data:/app/data
+
+  backend-reminders:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.reminders
+    image: pulseid-backend-reminders:latest
+    container_name: pulseid-backend-reminders
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Optional — reminders send by whichever of SMTP/Twilio is configured;
+      # with neither set the scheduler just logs what it would have sent.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-PulseID <no-reply@pulseid.example>}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      REMINDER_CRON: ${REMINDER_CRON:-*/15 * * * *}
+    volumes:
+      # Same data directory as the `backend` service above — this process
+      # only ever reads/updates appointments in that same database.
+      - pulseid-data:/app/data
+
+  backend-followups:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.followups
+    image: pulseid-backend-followups:latest
+    container_name: pulseid-backend-followups
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Optional — check-in prompts send by whichever of SMTP/Twilio is
+      # configured; with neither set the scheduler just logs what it would
+      # have sent (same fallback as backend-reminders above).
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-PulseID <no-reply@pulseid.example>}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      # Optional — check-in summaries use whichever AI provider is
+      # configured; with neither set, check-ins still work and are still
+      # risk-flagged (rule-based), just without an AI-written summary.
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FOLLOWUP_CRON: ${FOLLOWUP_CRON:-0 * * * *}
+    volumes:
+      # Same data directory as the `backend` service above — this process
+      # only ever reads/updates follow-up agents/check-ins in that same
+      # database.
+      - pulseid-data:/app/data
+
+volumes:
+  pulseid-data:
+  pulseid-analytics-data:

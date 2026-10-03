@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "PulseID — National Health Record Network",
+  "short_name": "PulseID",
+  "description": "One National ID. A lifelong medical record — instantly readable by clinicians, and safely by first responders via emergency QR.",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ],
+  "theme_color": "#0E7C7B",
+  "background_color": "#F6F8F8",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "start_url": "/",
+  "shortcuts": [
+    { "name": "Patient login", "url": "/patient/login" },
+    { "name": "Doctor login", "url": "/doctor/login" }
+  ]
+}

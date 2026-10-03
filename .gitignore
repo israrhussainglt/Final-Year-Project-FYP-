@@ -1,0 +1,38 @@
+# --- dependencies ---
+node_modules/
+
+# --- env files — never commit real secrets, only the .env.example templates ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- build output ---
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# --- runtime data (SQLite databases + journal files, seeded/created on first run) ---
+backend/data/
+analytics/data/
+*.db
+*.db-shm
+*.db-wal
+
+# --- logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- misc ---
+coverage/
+.env.vault

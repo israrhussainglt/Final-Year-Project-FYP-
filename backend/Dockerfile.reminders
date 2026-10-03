@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+#
+# A separate, much lighter image that just runs the appointment reminder
+# scheduler (scripts/reminder-scheduler.ts) as a long-lived process — no
+# Express server, since it never serves HTTP. Shares the same source, deps,
+# and SQLite data volume as the main backend image; only the entrypoint
+# differs (mirrors analytics/Dockerfile.scheduler).
+
+FROM node:20-alpine
+WORKDIR /app
+RUN apk add --no-cache python3 make g++
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+
+RUN addgroup -S pulseid && adduser -S pulseid -G pulseid && mkdir -p /app/data && chown -R pulseid:pulseid /app
+USER pulseid
+
+VOLUME ["/app/data"]
+CMD ["npx", "tsx", "scripts/reminder-scheduler.ts"]
