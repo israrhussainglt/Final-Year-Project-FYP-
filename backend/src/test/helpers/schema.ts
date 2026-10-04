@@ -148,5 +148,15 @@ export function createClinicalSchema(db: {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_notifications_patient ON notifications(patient_id, is_read, created_at DESC);
+    CREATE TABLE IF NOT EXISTS prescriptions (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      doctor_id TEXT REFERENCES doctors(id),
+      medical_record_id TEXT REFERENCES medical_records(id),
+      medications TEXT NOT NULL,
+      instructions TEXT,
+      issued_date TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON prescriptions(patient_id);
   `);
 }

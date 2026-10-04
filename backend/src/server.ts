@@ -101,6 +101,8 @@ import {
   listPrescriptionsForRecord,
   finalizeMedicalRecord,
   createPrescription,
+  deletePrescriptionsForRecord,
+  deleteRagChunksForSource,
   createNotification,
   listNotificationsForPatient,
   countUnreadNotificationsForPatient,
@@ -1771,6 +1773,13 @@ app.post("/api/doctor/registrations/:id/reject", requireDoctor, (req, res) => {
   rejectPatientRegistration(registration.id, session.doctorId, session.fullName);
   // A rejected request's uploaded reports are worthless and can't be
   // un-inserted, so they're removed from disk rather than left to accumulate.
+  // Their embedded RAG chunks go too (attachment text + the profile chunk with
+  // the applicant's personal details) — the files are gone, so the extracted
+  // text must not outlive the rejection.
+  for (const attachment of getRegistrationAttachments(registration.id)) {
+    deleteRagChunksForSource("attachment", attachment.id);
+  }
+  deleteRagChunksForSource("profile", registration.id);
   const removed = purgeRegistrationAttachments(registration.id, UPLOAD_DIR);
   res.json({ ok: true, attachmentsRemoved: removed });
 });
@@ -2443,6 +2452,11 @@ app.post("/api/patients/:id/records/:recordId/draft", requireDoctor, async (req,
       disclaimer: AI_REPORT_DISCLAIMER,
     });
   } catch (err) {
+    if ((err as Error)?.message === "RAG_DRAFT_INCOMPLETE") {
+      return res
+        .status(502)
+        .json({ error: "The AI draft came back incomplete. Please try drafting again — it usually succeeds on retry." });
+    }
     console.error("[pulseid-backend] AI report drafting failed:", err);
     res.status(500).json({ error: "Couldn't draft the report. Please try again." });
   }
@@ -2483,6 +2497,9 @@ app.post("/api/patients/:id/records/:recordId/finalize", requireDoctor, (req, re
   }
 
   const updated = finalizeMedicalRecord(record.id, { diagnosis, notes });
+  // Sending is replace-semantics: a re-finalize (doctor edits an already-sent
+  // report) rewrites the visit's prescriptions instead of stacking duplicates.
+  deletePrescriptionsForRecord(record.id);
   const prescription = medications.length
     ? createPrescription({
         patientId: patient.id,

@@ -2016,6 +2016,13 @@ export function createPrescription(input: {
   return db.prepare("SELECT * FROM prescriptions WHERE id = ?").get(id) as Prescription;
 }
 
+// A finalized report replaces the visit's prescriptions entirely — a
+// re-finalize (doctor edits a sent report) must not stack duplicate
+// medication rows for the same visit.
+export function deletePrescriptionsForRecord(medicalRecordId: string): void {
+  getDb().prepare("DELETE FROM prescriptions WHERE medical_record_id = ?").run(medicalRecordId);
+}
+
 // ---------- RAG chunk persistence ----------
 
 export function insertRagChunk(input: {

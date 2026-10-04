@@ -323,7 +323,12 @@ export class PatientVectorStore extends VectorStore {
       .map(({ chunk, score }) => [
         new Document({
           pageContent: chunk.content,
-          metadata: { label: chunk.label, sourceType: chunk.source_type, sourceId: chunk.source_id },
+          metadata: {
+            label: chunk.label,
+            sourceType: chunk.source_type,
+            sourceId: chunk.source_id,
+            chunkId: chunk.id,
+          },
         }),
         score,
       ]);
@@ -546,7 +551,26 @@ export async function retrievePatientContext(
     }
     const store = new PatientVectorStore(listRagChunksForPatient(patientId));
     if (store.hasVectors()) {
-      return { docs: await store.similaritySearch(query, k), mode: "vector" };
+      const docs = await store.similaritySearch(query, k);
+      // Chunks whose embedding could not be backfilled are invisible to the
+      // vector search above — serve them through the keyword index so a
+      // transient model failure can never silently drop a chunk from a draft.
+      const all = listRagChunksForPatient(patientId);
+      const stillMissing = new Set(all.filter((c) => c.embedding === null).map((c) => c.id));
+      if (stillMissing.size > 0) {
+        const seen = new Set(docs.map((d) => d.metadata.chunkId as string));
+        for (const c of searchRagChunksFtsForPatient(patientId, query, k)) {
+          if (!stillMissing.has(c.id) || seen.has(c.id)) continue;
+          seen.add(c.id);
+          docs.push(
+            new Document({
+              pageContent: c.content,
+              metadata: { label: c.label, sourceType: c.source_type, sourceId: c.source_id, chunkId: c.id },
+            })
+          );
+        }
+      }
+      return { docs, mode: "vector" };
     }
   }
 
@@ -620,12 +644,15 @@ export async function draftPatientReport(input: {
   const model = new ChatOpenAI({
     apiKey: groqApiKey(),
     model: groqModel(),
-    // Mirrors the reference Groq payload: temperature 1, 2048 completion
-    // tokens, top_p 1, and medium reasoning effort for gpt-oss models.
+    // Mirrors the reference Groq payload: temperature 1, top_p 1, and — for
+    // gpt-oss models, whose reasoning and output share one token budget —
+    // medium reasoning effort. Non-gpt-oss Groq models reject that parameter,
+    // so it's only sent for them. The budget is generous because reasoning
+    // tokens count toward it; a tight cap truncates the tool call mid-JSON.
     temperature: 1,
-    maxTokens: 2048,
+    maxTokens: 8192,
     topP: 1,
-    modelKwargs: { reasoning_effort: "medium" },
+    ...(groqModel().includes("gpt-oss") ? { modelKwargs: { reasoning_effort: "medium" } } : {}),
     configuration: { baseURL: "https://api.groq.com/openai/v1" },
     maxRetries: 1,
   });
@@ -649,10 +676,20 @@ Draft the structured report now.`,
     ],
   ]);
   const chain = prompt.pipe(structuredModel);
-  return chain.invoke({
-    patientName: input.patientName,
-    visitDate: input.visitDate,
-    keywords: input.keywords,
-    context: context || "(no additional retrieved context)",
-  });
+  try {
+    return await chain.invoke({
+      patientName: input.patientName,
+      visitDate: input.visitDate,
+      keywords: input.keywords,
+      context: context || "(no additional retrieved context)",
+    });
+  } catch (err) {
+    // A truncated or malformed tool call surfaces as a schema-parse failure.
+    // Distinguish it from network/auth errors so the UI can say "try again"
+    // instead of implying a system fault.
+    if (err instanceof z.ZodError || /parse|schema|invalid tool/i.test(String((err as Error)?.message ?? ""))) {
+      throw new Error("RAG_DRAFT_INCOMPLETE");
+    }
+    throw err;
+  }
 }

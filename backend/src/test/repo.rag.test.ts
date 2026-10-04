@@ -32,6 +32,9 @@ let buildVisitChunkText: typeof import("../lib/rag").buildVisitChunkText;
 let insertRagChunk: typeof import("../lib/repo").insertRagChunk;
 let deleteRagChunksForSource: typeof import("../lib/repo").deleteRagChunksForSource;
 let countRagChunksForSource: typeof import("../lib/repo").countRagChunksForSource;
+let createPrescription: typeof import("../lib/repo").createPrescription;
+let deletePrescriptionsForRecord: typeof import("../lib/repo").deletePrescriptionsForRecord;
+let listPrescriptionsForRecord: typeof import("../lib/repo").listPrescriptionsForRecord;
 let listRagChunksForPatient: typeof import("../lib/repo").listRagChunksForPatient;
 let searchRagChunksFtsForPatient: typeof import("../lib/repo").searchRagChunksFtsForPatient;
 let listAttachmentsForPatient: typeof import("../lib/repo").listAttachmentsForPatient;
@@ -83,6 +86,9 @@ beforeAll(async () => {
     insertRagChunk,
     deleteRagChunksForSource,
     countRagChunksForSource,
+    createPrescription,
+    deletePrescriptionsForRecord,
+    listPrescriptionsForRecord,
     listRagChunksForPatient,
     searchRagChunksFtsForPatient,
     listAttachmentsForPatient,
@@ -284,6 +290,108 @@ describe("approval re-parents booking-time chunks and attachments", () => {
 
     const promoted = listAttachmentsForPatient(patientId);
     expect(promoted.map((a) => a.id)).toContain(attachment.id);
+  });
+});
+
+describe("report finalize prescription replace-semantics", () => {
+  function insertRecord(id: string) {
+    getDb()
+      .prepare(
+        `INSERT INTO medical_records (id, patient_id, doctor_id, record_type, visit_date)
+         VALUES (?, ?, ?, 'checkup', '2026-10-04')`
+      )
+      .run(id, PATIENT_A, DOCTOR_ID);
+  }
+
+  function rx(recordId: string, name: string) {
+    return createPrescription({
+      patientId: PATIENT_A,
+      doctorId: DOCTOR_ID,
+      medicalRecordId: recordId,
+      medications: [{ name, dosage: "500 mg", frequency: "twice daily", duration: "7 days" }],
+      instructions: null,
+      issuedDate: "2026-10-04",
+    });
+  }
+
+  it("re-finalize clears the visit's prescriptions before the new ones land", () => {
+    const recordA = randomUUID();
+    const recordB = randomUUID();
+    insertRecord(recordA);
+    insertRecord(recordB);
+    rx(recordA, "Metformin");
+    rx(recordA, "Paracetamol");
+
+    // The finalize route calls this before createPrescription — the old rows
+    // must be gone, and only the same visit's rows, never another visit's.
+    deletePrescriptionsForRecord(recordA);
+    expect(listPrescriptionsForRecord(recordA)).toHaveLength(0);
+    expect(listPrescriptionsForRecord(recordB)).toHaveLength(0);
+  });
+
+  it("deleting one visit's prescriptions leaves other visits untouched", () => {
+    const recordA = randomUUID();
+    const recordB = randomUUID();
+    insertRecord(recordA);
+    insertRecord(recordB);
+    rx(recordA, "Metformin");
+    const kept = rx(recordB, "Warfarin");
+
+    deletePrescriptionsForRecord(recordA);
+    const keptRows = listPrescriptionsForRecord(recordB);
+    expect(keptRows).toHaveLength(1);
+    expect(keptRows[0].id).toBe(kept.id);
+  });
+});
+
+describe("rejected registration chunk cleanup", () => {
+  it("removes the profile chunk and attachment chunks (rows + FTS mirror) for a registration", () => {
+    const registrationId = randomUUID();
+    const attachmentId = randomUUID();
+    getDb()
+      .prepare(
+        `INSERT INTO patient_registrations (id, national_id, full_name, date_of_birth, gender, phone_number, doctor_id)
+         VALUES (?, '41000-9999999-9', 'Pending Applicant', '1990-01-01', 'male', '+92 300 0000000', ?)`
+      )
+      .run(registrationId, DOCTOR_ID);
+    insertRagChunk({
+      id: randomUUID(),
+      patientId: null,
+      registrationId,
+      sourceType: "profile",
+      sourceId: registrationId,
+      chunkIndex: 0,
+      label: "Patient profile (from booking request)",
+      content: "Patient profile (personal details). Name: Pending Applicant.",
+      embedding: null,
+      embeddingModel: null,
+    });
+    insertRagChunk({
+      id: randomUUID(),
+      patientId: null,
+      registrationId,
+      sourceType: "attachment",
+      sourceId: attachmentId,
+      chunkIndex: 0,
+      label: "Report: lab.pdf",
+      content: "Haemoglobin 13.2 g/dL.",
+      embedding: null,
+      embeddingModel: null,
+    });
+    expect(countRagChunksForSource("profile", registrationId)).toBe(1);
+    expect(countRagChunksForSource("attachment", attachmentId)).toBe(1);
+
+    // Exactly what the reject route now does, per attachment then the profile.
+    deleteRagChunksForSource("attachment", attachmentId);
+    deleteRagChunksForSource("profile", registrationId);
+
+    expect(countRagChunksForSource("profile", registrationId)).toBe(0);
+    expect(countRagChunksForSource("attachment", attachmentId)).toBe(0);
+    const db = getDb();
+    const ftsLeft = db
+      .prepare("SELECT COUNT(*) c FROM rag_chunks_fts WHERE chunk_id IN (SELECT id FROM rag_chunks WHERE registration_id = ?)")
+      .get(registrationId) as { c: number };
+    expect(ftsLeft.c).toBe(0);
   });
 });
 
