@@ -385,7 +385,7 @@ export function Website({ t, onToggleView, onToggleLang }: { t: LandingCopy; onT
 
           {/* Illustrative stage: a CNIC-style card + the responder's phone view */}
           <div className="relative h-[470px] hidden sm:block" aria-hidden="true">
-            <div className="absolute start-0 top-8 w-[380px] max-w-[94%] aspect-[1.586] rounded-[20px] p-6 text-white bg-[linear-gradient(135deg,#0E7C7B,#0A5F5E)] shadow-[0_40px_70px_-30px_rgba(10,95,94,0.7)] -rotate-3 flex flex-col justify-between">
+            <div className="absolute start-0 top-8 w-[380px] max-w-[94%] aspect-[1.586] rounded-[20px] p-6 text-white bg-[linear-gradient(135deg,#0E7C7B,#0A5F5E)] shadow-[0_40px_70px_-30px_rgba(10,95,94,0.7)] -rotate-3 flex flex-col justify-between transition-all duration-300 ease-out hover:-translate-y-2 hover:rotate-0 hover:shadow-[0_56px_90px_-30px_rgba(10,95,94,0.85)] hover:z-10">
               <div className="flex justify-between text-xs font-medium opacity-80">
                 <span>{t.stageCardTop1}</span>
                 <span>{t.stageCardTop2}</span>
@@ -409,7 +409,7 @@ export function Website({ t, onToggleView, onToggleLang }: { t: LandingCopy; onT
               </div>
             </div>
 
-            <div className="absolute end-0 bottom-0 w-[248px] bg-white border border-line rounded-[28px] p-5 shadow-[0_40px_80px_-30px_rgba(11,32,39,0.55)]">
+            <div className="absolute end-0 bottom-0 w-[248px] bg-white border border-line rounded-[28px] p-5 shadow-[0_40px_80px_-30px_rgba(11,32,39,0.55)] transition-all duration-300 ease-out hover:-translate-y-2 hover:shadow-[0_56px_100px_-30px_rgba(11,32,39,0.65)] hover:z-10">
               <div className="flex items-center gap-2 text-[13px] font-semibold text-alert">
                 <span className="w-2 h-2 rounded-full bg-alert" />
                 {t.emergencyView}
@@ -485,16 +485,24 @@ export function Website({ t, onToggleView, onToggleLang }: { t: LandingCopy; onT
               { label: t.lockedVisits, w: 45 },
               { label: t.lockedReports, w: 60 },
             ].map((row) => (
-              <div key={row.label} className="flex items-center justify-between gap-4 py-3.5 border-b border-line last:border-b-0">
+              <div key={row.label} className="group flex items-center justify-between gap-4 py-3.5 border-b border-line last:border-b-0">
                 <span className="text-sage text-[15px]">{row.label}</span>
                 <span className="flex items-center gap-3 flex-1 justify-end">
                   <i
-                    className="h-2.5 rounded-full max-w-[60%] flex-none w-full"
+                    className="relative h-2.5 rounded-full max-w-[60%] flex-none w-full overflow-hidden"
                     style={{
                       maxWidth: `${row.w}%`,
                       background: "repeating-linear-gradient(90deg,#DCE4E3 0 8px,transparent 8px 11px)",
                     }}
-                  />
+                  >
+                    {/* Hover: the record "unlocks" — a green sweep fills the track. */}
+                    <i
+                      className="absolute inset-y-0 left-0 w-0 group-hover:w-full transition-all duration-700 ease-out"
+                      style={{
+                        background: "repeating-linear-gradient(90deg,#0E7C7B 0 8px,transparent 8px 11px)",
+                      }}
+                    />
+                  </i>
                   <I d={ICONS.lock} className="w-[18px] h-[18px] text-sage shrink-0" />
                 </span>
               </div>
@@ -566,7 +574,7 @@ export function Website({ t, onToggleView, onToggleLang }: { t: LandingCopy; onT
               { icon: ICONS.shield, title: t.security4Title, body: t.security4Body },
             ].map((item) => (
               <div key={item.title} className="border-t border-line py-7 pb-9">
-                <I d={item.icon} className="text-teal mb-4" />
+                <I d={item.icon} className="w-8 h-8 text-teal mb-4" />
                 <h3 className="font-semibold text-lg text-ink mb-2">{item.title}</h3>
                 <p className="text-sage text-[16px] leading-relaxed max-w-[42ch]">{item.body}</p>
               </div>
