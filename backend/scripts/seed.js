@@ -398,28 +398,6 @@ CREATE TABLE IF NOT EXISTS registration_attachments (
 CREATE INDEX IF NOT EXISTS idx_registration_attachments_registration
   ON registration_attachments(registration_id);
 
--- RAG vector index (lib/rag.ts): one row per indexable text chunk of the
--- patient's record — profile details, visits, uploaded report PDFs. The
--- embedding BLOB is a normalized MiniLM vector, NULL when the local model
--- isn't loaded yet (those rows still serve the FTS keyword fallback).
-CREATE TABLE IF NOT EXISTS rag_chunks (
-  id TEXT PRIMARY KEY,
-  patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
-  registration_id TEXT REFERENCES patient_registrations(id) ON DELETE CASCADE,
-  source_type TEXT NOT NULL CHECK (source_type IN ('profile','visit','attachment')),
-  source_id TEXT NOT NULL,
-  chunk_index INTEGER NOT NULL DEFAULT 0,
-  label TEXT NOT NULL,
-  content TEXT NOT NULL,
-  embedding BLOB,
-  embedding_model TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_rag_chunks_patient ON rag_chunks(patient_id);
-CREATE INDEX IF NOT EXISTS idx_rag_chunks_registration ON rag_chunks(registration_id);
-CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_id);
-CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(chunk_id UNINDEXED, content);
-
 -- In-app-only patient notifications (e.g. an AI-drafted report was sent).
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,

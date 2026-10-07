@@ -386,11 +386,7 @@ function migrateFollowupCheckins(db: Database.Database): void {
 //    against the booking *request* and dropped out of sight once approved.
 //    approvePatientRegistration stamps this, promoting them to the patient's
 //    own documents and into the RAG corpus.
-// 2. rag_chunks — the vector index. One row per indexable text chunk; the
-//    embedding BLOB is the normalized MiniLM vector (or NULL when the local
-//    model isn't available yet — those rows still serve the FTS fallback).
-//    rag_chunks_fts mirrors content for keyword retrieval without embeddings.
-// 3. notifications — in-app-only patient notifications (AI-drafted report
+// 2. notifications — in-app-only patient notifications (AI-drafted report
 //    sent, etc.). No email/SMS — those are separate configured channels.
 function migrateRagAndNotifications(db: Database.Database): void {
   const attachmentColumns = db.prepare(`PRAGMA table_info(registration_attachments)`).all() as { name: string }[];
@@ -398,23 +394,6 @@ function migrateRagAndNotifications(db: Database.Database): void {
     db.exec(`ALTER TABLE registration_attachments ADD COLUMN patient_id TEXT REFERENCES patients(id);`);
   }
   db.exec(`
-    CREATE TABLE IF NOT EXISTS rag_chunks (
-      id TEXT PRIMARY KEY,
-      patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
-      registration_id TEXT REFERENCES patient_registrations(id) ON DELETE CASCADE,
-      source_type TEXT NOT NULL CHECK (source_type IN ('profile','visit','attachment')),
-      source_id TEXT NOT NULL,
-      chunk_index INTEGER NOT NULL DEFAULT 0,
-      label TEXT NOT NULL,
-      content TEXT NOT NULL,
-      embedding BLOB,
-      embedding_model TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_patient ON rag_chunks(patient_id);
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_registration ON rag_chunks(registration_id);
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_id);
-    CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(chunk_id UNINDEXED, content);
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY,
       patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,

@@ -2,7 +2,7 @@
   "name": "pulseid-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "PulseID API server — auth, patient records, emergency QR, and audit logging.",
+  "description": "PulseID API server \u2014 auth, patient records, emergency QR, and audit logging.",
   "main": "dist/server.js",
   "scripts": {
     "predev": "node scripts/seed.js",
@@ -14,14 +14,12 @@
     "reminders": "tsx scripts/reminder-scheduler.ts",
     "followups": "tsx scripts/followup-scheduler.ts",
     "test": "vitest run",
+    "rag": "cd rag && python run.py",
+    "rag:test": "cd rag && python -m pytest tests",
+    "test:coverage": "vitest run --coverage",
     "postinstall": "node scripts/ensure-sqlite-shim.mjs"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
-    "@langchain/community": "^1.1.29",
-    "@langchain/core": "^1.2.14",
-    "@langchain/openai": "^1.6.2",
-    "@langchain/textsplitters": "^1.0.2",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
     "cookie-parser": "^1.4.6",
@@ -33,7 +31,6 @@
     "multer": "^2.4.0",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.16",
-    "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
     "qrcode": "^1.5.4",
     "zod": "^4.6.5"
@@ -50,7 +47,10 @@
     "@types/nodemailer": "^6.4.16",
     "@types/pdfkit": "^0.17.6",
     "@types/qrcode": "^1.5.5",
+    "@types/supertest": "^7.2.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "libsql": "^0.5.29",
+    "supertest": "^7.3.1",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.9"

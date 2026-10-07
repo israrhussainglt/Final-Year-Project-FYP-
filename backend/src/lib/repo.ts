@@ -31,7 +31,6 @@ import type {
   RegistrationStatus,
   BloodGroup,
   Medication,
-  RagChunk,
   Notification,
 } from "./types";
 
@@ -1897,15 +1896,12 @@ export function approvePatientRegistration(input: {
     ).run(patient.id, appointment.id, input.doctorName, input.registrationId);
 
     // Uploaded reports become the patient's own documents at the moment the
-    // booking is approved — and their RAG chunks (indexed at booking time,
-    // see lib/rag.ts) re-parent from the registration to the patient inside
-    // this same transaction, so an approval can never leave the corpus
-    // pointing at an orphaned registration.
+    // booking is approved. Their RAG chunks (indexed at booking time) are
+    // re-parented right after this transaction commits, via the RAG service
+    // (lib/rag.ts reparentRagIndex, called from the allocate route) — the
+    // vector index now lives outside this database.
     db.prepare(
       `UPDATE registration_attachments SET patient_id = ? WHERE registration_id = ?`
-    ).run(patient.id, reg.id);
-    db.prepare(
-      `UPDATE rag_chunks SET patient_id = ? WHERE registration_id = ?`
     ).run(patient.id, reg.id);
 
     return { patientId: patient.id, appointmentId: appointment.id };
@@ -1955,9 +1951,9 @@ export function purgeRegistrationAttachments(registrationId: string, uploadDir: 
 }
 
 // ---------------------------------------------------------------------------
-// RAG vector index (see lib/rag.ts) — chunk persistence, attachment
-// promotion, and the notification feed. All retrieval math lives in rag.ts;
-// this section is only rows in and out of SQLite.
+// Uploaded reports after approval and the notification feed. The RAG vector
+// index lives in the Python service (backend/rag) — this file no longer
+// persists chunk rows.
 // ---------------------------------------------------------------------------
 
 export function findMedicalRecordById(id: string): MedicalRecord | undefined {
@@ -2021,116 +2017,6 @@ export function createPrescription(input: {
 // medication rows for the same visit.
 export function deletePrescriptionsForRecord(medicalRecordId: string): void {
   getDb().prepare("DELETE FROM prescriptions WHERE medical_record_id = ?").run(medicalRecordId);
-}
-
-// ---------- RAG chunk persistence ----------
-
-export function insertRagChunk(input: {
-  id: string;
-  patientId: string | null;
-  registrationId: string | null;
-  sourceType: RagChunk["source_type"];
-  sourceId: string;
-  chunkIndex: number;
-  label: string;
-  content: string;
-  embedding: Buffer | null;
-  embeddingModel: string | null;
-}): RagChunk {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO rag_chunks (id, patient_id, registration_id, source_type, source_id, chunk_index, label, content, embedding, embedding_model)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
-  ).run(
-    input.id,
-    input.patientId,
-    input.registrationId,
-    input.sourceType,
-    input.sourceId,
-    input.chunkIndex,
-    input.label,
-    input.content,
-    input.embedding,
-    input.embeddingModel
-  );
-  // Keep the FTS mirror in sync for the keyword fallback path.
-  db.prepare(`INSERT INTO rag_chunks_fts (chunk_id, content) VALUES (?, ?)`).run(input.id, input.content);
-  return db.prepare("SELECT * FROM rag_chunks WHERE id = ?").get(input.id) as RagChunk;
-}
-
-export function deleteRagChunksForSource(sourceType: RagChunk["source_type"], sourceId: string): void {
-  const db = getDb();
-  const ids = db
-    .prepare("SELECT id FROM rag_chunks WHERE source_type = ? AND source_id = ?")
-    .all(sourceType, sourceId) as { id: string }[];
-  for (const { id } of ids) {
-    db.prepare("DELETE FROM rag_chunks_fts WHERE chunk_id = ?").run(id);
-  }
-  db.prepare("DELETE FROM rag_chunks WHERE source_type = ? AND source_id = ?").run(sourceType, sourceId);
-}
-
-export function countRagChunksForSource(sourceType: RagChunk["source_type"], sourceId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE source_type = ? AND source_id = ?")
-    .get(sourceType, sourceId) as { n: number };
-  return row.n;
-}
-
-export function countRagChunksMissingEmbedding(patientId: string): number {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE patient_id = ? AND embedding IS NULL")
-    .get(patientId) as { n: number };
-  return row.n;
-}
-
-export function listRagChunksForPatient(patientId: string): RagChunk[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM rag_chunks WHERE patient_id = ? ORDER BY created_at ASC")
-    .all(patientId) as RagChunk[];
-}
-
-export function listRagChunksForRegistration(registrationId: string): RagChunk[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM rag_chunks WHERE registration_id = ? ORDER BY chunk_index ASC")
-    .all(registrationId) as RagChunk[];
-}
-
-export function setRagChunkEmbedding(id: string, embedding: Buffer, model: string): void {
-  const db = getDb();
-  db.prepare("UPDATE rag_chunks SET embedding = ?, embedding_model = ? WHERE id = ?").run(embedding, model, id);
-}
-
-// Keyword fallback when the local embedding model can't load. The fts table
-// is content-mirrored at insert time; the patient_id filter comes from the
-// join back to rag_chunks, never from user input.
-export function searchRagChunksFtsForPatient(patientId: string, query: string, limit = 5): RagChunk[] {
-  const db = getDb();
-  // FTS5 query syntax is user-facing input here, so reduce it to a quoted
-  // OR of tokens — a malformed MATCH expression would otherwise throw.
-  const tokens = query
-    .split(/[^a-zA-Z0-9]+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 1)
-    .slice(0, 12);
-  if (tokens.length === 0) return [];
-  const match = tokens.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
-  try {
-    return db
-      .prepare(
-        `SELECT r.* FROM rag_chunks_fts f
-         JOIN rag_chunks r ON r.id = f.chunk_id
-         WHERE rag_chunks_fts MATCH ? AND r.patient_id = ?
-         ORDER BY bm25(rag_chunks_fts) ASC
-         LIMIT ?`
-      )
-      .all(match, patientId, limit) as RagChunk[];
-  } catch {
-    return [];
-  }
 }
 
 // ---------- Uploaded reports after approval ----------

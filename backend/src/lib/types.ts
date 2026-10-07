@@ -66,7 +66,7 @@ export interface MedicalRecord {
   symptoms: string | null;
   notes: string | null;
   // Optional per-visit vitals (nullable) — feed the risk scorer when present
-  // and the RAG visit chunk text.
+  // and the RAG service's visit chunk text (backend/rag).
   systolic_bp: number | null;
   diastolic_bp: number | null;
   blood_sugar_mmol: number | null;
@@ -349,26 +349,6 @@ export interface RegistrationAttachment {
   original_name: string;
   mime_type: string;
   size_bytes: number;
-  created_at: string;
-}
-
-// One indexable text chunk in the RAG vector index (lib/rag.ts). Chunks are
-// created against a pending registration at booking time and re-parented to
-// the patient inside the approval transaction.
-export interface RagChunk {
-  id: string;
-  patient_id: string | null;
-  registration_id: string | null;
-  source_type: "profile" | "visit" | "attachment";
-  source_id: string;
-  chunk_index: number;
-  label: string;
-  content: string;
-  // Normalized MiniLM vector as a BLOB, or NULL when the local embedding
-  // model wasn't available at index time (FTS keyword fallback still serves
-  // these; ensurePatientIndexed backfills embeddings opportunistically).
-  embedding: Buffer | null;
-  embedding_model: string | null;
   created_at: string;
 }
 

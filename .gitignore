@@ -36,3 +36,11 @@ Thumbs.db
 # --- misc ---
 coverage/
 .env.vault
+
+# --- Python (backend/rag service) ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+backend/rag/data/

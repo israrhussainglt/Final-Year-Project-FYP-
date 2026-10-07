@@ -120,23 +120,6 @@ export function createClinicalSchema(db: {
       size_bytes INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE TABLE IF NOT EXISTS rag_chunks (
-      id TEXT PRIMARY KEY,
-      patient_id TEXT REFERENCES patients(id) ON DELETE CASCADE,
-      registration_id TEXT REFERENCES patient_registrations(id) ON DELETE CASCADE,
-      source_type TEXT NOT NULL CHECK (source_type IN ('profile','visit','attachment')),
-      source_id TEXT NOT NULL,
-      chunk_index INTEGER NOT NULL DEFAULT 0,
-      label TEXT NOT NULL,
-      content TEXT NOT NULL,
-      embedding BLOB,
-      embedding_model TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_patient ON rag_chunks(patient_id);
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_registration ON rag_chunks(registration_id);
-    CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_id);
-    CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(chunk_id UNINDEXED, content);
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY,
       patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
@@ -158,5 +141,35 @@ export function createClinicalSchema(db: {
       issued_date TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON prescriptions(patient_id);
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT REFERENCES patients(id),
+      actor_role TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      actor_id TEXT,
+      action TEXT NOT NULL,
+      details TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_patient ON audit_logs(patient_id);
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      national_id TEXT PRIMARY KEY,
+      code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS otp_send_log (
+      id TEXT PRIMARY KEY,
+      national_id TEXT NOT NULL,
+      sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_otp_send_log_national_id ON otp_send_log(national_id, sent_at);
+    CREATE TABLE IF NOT EXISTS doctor_recent_patients (
+      doctor_id TEXT NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+      patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      viewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (doctor_id, patient_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_doctor_recent_patients_doctor ON doctor_recent_patients(doctor_id, viewed_at DESC);
   `);
 }

@@ -28,6 +28,8 @@ import {
   retrievePatientContext,
   draftPatientReport,
   isReportDrafterConfigured,
+  deleteRagSource,
+  reparentRagIndex,
 } from "./lib/rag";
 import { sendOtpSms, SMS_CONFIGURED } from "./lib/sms";
 import { csrfProtection, newCsrfToken, csrfCookieOptions, CSRF_COOKIE } from "./lib/csrf";
@@ -102,7 +104,6 @@ import {
   finalizeMedicalRecord,
   createPrescription,
   deletePrescriptionsForRecord,
-  deleteRagChunksForSource,
   createNotification,
   listNotificationsForPatient,
   countUnreadNotificationsForPatient,
@@ -145,7 +146,7 @@ import { computeRiskAssessment, hasAnyVitals, RISK_DISCLAIMER, type RiskContext 
 import { defaultQuestionsFor, flagCheckinResponses, summarizeCheckin } from "./lib/followup-agent";
 import type { FollowupQuestion, FollowupAgentStatus } from "./lib/types";
 
-const app = express();
+export const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const ORIGINS = (process.env.CORS_ORIGIN || "http://localhost:3000").split(",").map((s) => s.trim());
 const isProd = process.env.NODE_ENV === "production";
@@ -1745,6 +1746,13 @@ app.post("/api/doctor/registrations/:id/allocate", requireDoctor, (req, res) => 
       details: `Appointment allocated from booking request for ${when.toISOString()}`,
     });
 
+    // The RAG chunks indexed against the booking request follow the patient.
+    // Fire-and-forget: the approval transaction above has already committed,
+    // and a RAG service hiccup must never fail an approved registration.
+    void reparentRagIndex(registration.id, patientId).catch((err) =>
+      console.error("[pulseid-backend] RAG chunk re-parenting failed:", err)
+    );
+
     res.json({ ok: true, patientId, appointmentId });
   } catch (err: any) {
     // The transaction rolls back completely on any throw, so there's no
@@ -1777,9 +1785,13 @@ app.post("/api/doctor/registrations/:id/reject", requireDoctor, (req, res) => {
   // the applicant's personal details) — the files are gone, so the extracted
   // text must not outlive the rejection.
   for (const attachment of getRegistrationAttachments(registration.id)) {
-    deleteRagChunksForSource("attachment", attachment.id);
+    void deleteRagSource("attachment", attachment.id).catch((err) =>
+      console.error("[pulseid-backend] RAG attachment deletion failed:", err)
+    );
   }
-  deleteRagChunksForSource("profile", registration.id);
+  void deleteRagSource("profile", registration.id).catch((err) =>
+    console.error("[pulseid-backend] RAG profile deletion failed:", err)
+  );
   const removed = purgeRegistrationAttachments(registration.id, UPLOAD_DIR);
   res.json({ ok: true, attachmentsRemoved: removed });
 });
@@ -2422,7 +2434,7 @@ app.post("/api/patients/:id/records/:recordId/draft", requireDoctor, async (req,
   }
   if (!isReportDrafterConfigured()) {
     return res.status(503).json({
-      error: "AI report drafting isn't configured for this deployment yet. Set GROQ_API_KEY in backend/.env (key from console.groq.com) and restart the backend.",
+      error: "AI report drafting isn't configured for this deployment yet. Set RAG_SERVICE_ENABLED=1 in backend/.env and start the RAG service (backend/rag — see its README; the Groq key lives in backend/rag/.env).",
     });
   }
 
@@ -2448,7 +2460,7 @@ app.post("/api/patients/:id/records/:recordId/draft", requireDoctor, async (req,
     });
     res.json({
       draft,
-      retrieval: { mode, sources: docs.map((d) => d.metadata.label) },
+      retrieval: { mode, sources: docs.map((d) => d.label) },
       disclaimer: AI_REPORT_DISCLAIMER,
     });
   } catch (err) {
@@ -3247,7 +3259,11 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: "Internal server error." });
 });
 
-app.listen(PORT, () => {
-  console.log(`[pulseid-backend] listening on http://localhost:${PORT}`);
-  console.log(`[pulseid-backend] allowed origins: ${ORIGINS.join(", ")}`);
-});
+// Listening is guarded so tests can import the app (supertest binds its own
+// ephemeral port); every other environment starts the server as before.
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    console.log(`[pulseid-backend] listening on http://localhost:${PORT}`);
+    console.log(`[pulseid-backend] allowed origins: ${ORIGINS.join(", ")}`);
+  });
+}

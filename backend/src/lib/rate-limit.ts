@@ -41,5 +41,5 @@ export function rateLimit(
 export function requestIp(req: Request): string {
   const forwarded = req.headers["x-forwarded-for"];
   if (forwarded) return String(forwarded).split(",")[0].trim();
-  return req.ip || req.socket.remoteAddress || "unknown";
+  return req.ip || req.socket?.remoteAddress || "unknown";
 }
