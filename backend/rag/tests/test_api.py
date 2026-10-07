@@ -141,7 +141,52 @@ def test_draft_503_when_not_configured(client, no_groq):
     assert "GROQ_API_KEY" in res.json()["detail"]
 
 
-def test_draft_502_on_incomplete_tool_call(client, with_groq, monkeypatch):
+def test_draft_salvages_drifted_tool_call(client, with_groq, monkeypatch):
+    from app import generation
+
+    class BrokenCreate:
+        @staticmethod
+        def create(**_):
+            # Groq's server-side tool validation: the model used "medication"
+            # instead of "name", and the SDK exposes the body bare (no
+            # "error" wrapper) — the exact live failure seen 2026-10-07.
+            err = RuntimeError("Tool call validation failed: parameters did not match schema")
+            err.body = {
+                "message": "Tool call validation failed",
+                "type": "invalid_request_error",
+                "code": "tool_use_failed",
+                "failed_generation": json.dumps(
+                    {
+                        "name": "report_draft",
+                        "arguments": {
+                            "history_of_present_illness": "h",
+                            "examination_findings": "e",
+                            "assessment": "a",
+                            "treatment_plan": "t",
+                            "prescriptions": [{"medication": "Metformin", "dosage": "500 mg"}],
+                            "patient_advice": "p",
+                            "follow_up": "f",
+                        },
+                    }
+                ),
+            }
+            raise err
+
+    class BrokenClient:
+        class chat:
+            class completions:
+                create = BrokenCreate.create
+
+    monkeypatch.setattr(generation, "_client", lambda: BrokenClient())
+    res = client.post("/draft", json={"patientName": "P", "visitDate": "2026-01-15", "keywords": "k"})
+    # The salvage path recovers the drifted arguments, maps the alias, fills
+    # omitted fields with "", and returns a valid draft.
+    assert res.status_code == 200
+    rx = res.json()["draft"]["prescriptions"][0]
+    assert rx["name"] == "Metformin" and rx["frequency"] == ""
+
+
+def test_draft_502_on_unrecoverable_tool_call(client, with_groq, monkeypatch):
     from app import generation
 
     class BrokenCreate:

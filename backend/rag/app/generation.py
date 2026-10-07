@@ -48,7 +48,8 @@ def _tool_schema() -> dict:
         "type": "function",
         "function": {
             "name": "report_draft",
-            "description": "Write the structured clinical report draft.",
+            "description": "Write the structured clinical report draft. In prescriptions, "
+            'the medication-name key is exactly "name" — never "medication" or "medication_name".',
             "parameters": ReportDraft.model_json_schema(),
         },
     }
@@ -73,28 +74,45 @@ def _client():
     )
 
 
+# Observed model drift for the prescription `name` field — gpt-oss keeps
+# inventing plausible synonyms for the schema's exact key. All are mapped
+# back rather than throwing the whole draft away.
+_MED_NAME_ALIASES = ("medication_name", "medication", "drug", "med", "med_name")
+_MED_FIELDS = ("name", "dosage", "frequency", "duration", "instructions")
+
+
 def _normalize_arguments(raw: str | dict) -> str:
-    """Repair the model's near-miss argument JSON before validation. The one
-    observed drift is prescriptions[].medication_name for the schema's `name`
-    — accept the alias rather than throwing the whole draft away."""
+    """Repair the model's near-miss argument JSON before validation: map
+    `name` aliases to the schema key and default any omitted prescription
+    field to "" (the doctor reviews every line — an empty cell beats a
+    discarded draft)."""
     data = json.loads(raw) if isinstance(raw, str) else raw
     if isinstance(data, dict):
         for rx in data.get("prescriptions") or []:
-            if isinstance(rx, dict) and "name" not in rx and "medication_name" in rx:
-                rx["name"] = rx.pop("medication_name")
+            if not isinstance(rx, dict):
+                continue
+            if "name" not in rx:
+                for alias in _MED_NAME_ALIASES:
+                    if rx.get(alias):
+                        rx["name"] = rx.pop(alias)
+                        break
+            for field in _MED_FIELDS:
+                if field not in rx or rx[field] is None:
+                    rx[field] = ""
     return json.dumps(data)
 
 
 def _salvage_arguments(err: Exception) -> str | None:
     """Groq validates tool calls server-side; when the model's arguments drift
     from the schema the request 400s with `tool_use_failed` and the raw
-    arguments ride along as `failed_generation`. Pull them back out."""
+    arguments ride along as `failed_generation`. Pull them back out. The
+    openai SDK has exposed the body both wrapped ({"error": {...}}) and bare
+    ({...}) depending on version — accept either shape."""
     body = getattr(err, "body", None)
     failed = None
     if isinstance(body, dict):
-        error = body.get("error")
-        if isinstance(error, dict):
-            failed = error.get("failed_generation")
+        error = body.get("error") if isinstance(body.get("error"), dict) else body
+        failed = error.get("failed_generation") if isinstance(error, dict) else None
     if not isinstance(failed, str):
         return None
     try:
