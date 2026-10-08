@@ -3,14 +3,16 @@
 // booking API, allocates them as the doctor, and verifies the whole
 // pipeline end to end:
 //   - attachments land in data/uploads (server-random names),
-//   - text PDFs are chunked + embedded into the RAG index at booking time,
+//   - text PDFs are chunked + embedded into the RAG service's index at
+//     booking time,
 //   - image uploads are stored but deliberately NOT indexed (no OCR),
 //   - a .docx upload is rejected by the MIME whitelist,
 //   - allocation promotes attachments to the patient and re-parents the
-//     RAG chunks inside the approval transaction.
+//     registration's RAG chunks to the patient.
 //
-// Prereqs: backend running on :4000, seeded DB, embedding model cached in
-// data/models (first run downloads ~23 MB once).
+// Prereqs: backend running on :4000, seeded DB, and the standalone RAG
+// service (backend/rag/) running with RAG_SERVICE_ENABLED=1 — it owns its own
+// index database at backend/rag/data/rag-index.db.
 // Run: node scripts/demo-uploads.mjs
 import fs from "fs";
 import path from "path";
@@ -23,6 +25,8 @@ const BASE = process.argv[2] || "http://127.0.0.1:4000";
 const ROOT = process.cwd();
 const OUT_DIR = path.join(ROOT, "data", "demo-reports");
 const DB_PATH = path.join(ROOT, "data", "pulseid.db");
+// The RAG service keeps its own SQLite index, separate from the clinical DB.
+const RAG_DB_PATH = path.join(ROOT, "rag", "data", "rag-index.db");
 
 const DOCTOR_LOGIN = { email: "ayesha.raza@pulseid.dev", password: "doctor123" };
 
@@ -215,6 +219,17 @@ async function http(method, apiPath, { jar: cookieJar, body, form, ip: xff } = {
 const db = new Database(DB_PATH, { readonly: false });
 db.pragma("journal_mode = WAL");
 
+let ragDb;
+try {
+  ragDb = new Database(RAG_DB_PATH, { readonly: true, fileMustExist: true });
+} catch {
+  console.error(
+    `\nCould not open the RAG index at ${RAG_DB_PATH} — start the RAG service first\n` +
+      "(npm run rag from backend/, with RAG_SERVICE_ENABLED=1) and rerun.\n"
+  );
+  process.exit(1);
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -222,13 +237,13 @@ function sleep(ms) {
 async function waitForIndexing(registrationId, expectedMinimum, timeoutMs = 90_000) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
-    const n = db
-      .prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE registration_id = ?")
+    const n = ragDb
+      .prepare("SELECT COUNT(*) AS n FROM chunks WHERE registration_id = ?")
       .get(registrationId).n;
     if (n >= expectedMinimum) return n;
     await sleep(1500);
   }
-  return db.prepare("SELECT COUNT(*) AS n FROM rag_chunks WHERE registration_id = ?").get(registrationId).n;
+  return ragDb.prepare("SELECT COUNT(*) AS n FROM chunks WHERE registration_id = ?").get(registrationId).n;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,8 +365,8 @@ for (const p of PATIENTS) {
 
   ok(attachments.every((a) => a.patient_id === p.patientId), `${p.fullName}: attachments promoted to the patient at approval`);
 
-  const chunks = db
-    .prepare("SELECT source_type, source_id, label, length(embedding) AS emb FROM rag_chunks WHERE registration_id = ? OR patient_id = ?")
+  const chunks = ragDb
+    .prepare("SELECT source_type, source_id, label, length(embedding) AS emb FROM chunks WHERE registration_id = ? OR patient_id = ?")
     .all(p.registrationId, p.patientId);
   const profile = chunks.filter((c) => c.source_type === "profile");
   const pdfChunks = chunks.filter((c) => c.source_type === "attachment");
@@ -371,5 +386,6 @@ for (const p of PATIENTS) {
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
+ragDb.close();
 db.close();
 process.exit(failed > 0 ? 1 : 0);

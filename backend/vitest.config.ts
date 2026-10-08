@@ -2,8 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    // The RAG suite's beforeAll imports lib/rag (the whole LangChain stack) —
-    // cold-starts well past the 10 s default under coverage instrumentation.
+    // Route tests boot the whole Express app and cold-start under coverage
+    // instrumentation, which can exceed the 10 s default hook timeout.
     hookTimeout: 30_000,
     testTimeout: 30_000,
     // Route tests import server.ts for its exported app; the guard on

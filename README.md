@@ -102,7 +102,7 @@ The RAG pipeline now runs as a **standalone Python FastAPI service** under `back
 
 1. **What's in the index.** The service builds patient-scoped chunks from the patient's profile, visits and prescriptions, and uploaded report text. Booking uploads are indexed and associated with the patient during the booking/approval flow. Documents with no extractable text, such as scans or image-only uploads, are skipped because this build does not include OCR.
 
-2. **Embeddings run in the Python RAG service.** `backend/rag/` uses **FastEmbed MiniLM embeddings** with an **ONNX** runtime, so the RAG service does not require PyTorch. The embeddings are stored in a dedicated SQLite vector index owned by the RAG service rather than the Node application's `rag_chunks` table.
+2. **Embeddings run in the Python RAG service.** `backend/rag/` uses **FastEmbed MiniLM embeddings** with an **ONNX** runtime, so the RAG service does not require PyTorch. The embeddings are stored in the RAG service's own SQLite vector index (`backend/rag/data/rag-index.db`), completely separate from the Node application's database.
 
 3. **Retrieval has a keyword fallback.** The RAG service retrieves relevant patient-scoped chunks from its vector index and also provides an **SQLite FTS5 keyword fallback**. This keeps report drafting resilient when vector embedding/retrieval cannot be used.
 
@@ -240,19 +240,19 @@ The AI report-drafting pipeline is a standalone Python FastAPI service in `backe
 cd backend/rag
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt    # adjust if your dependencies live elsewhere
-uvicorn app.main:app --port 8001   # entry point is app/main.py; adjust the port to match your config
+pip install -r requirements.txt
+cp .env.example .env               # then set GROQ_API_KEY in it (key from console.groq.com)
+python run.py                      # starts on :8100; or `npm run rag` from backend/
 ```
 
-Settings (including your Groq API key) are read by `backend/rag/app/config.py`. Check that file for the exact variable names and defaults.
+Settings (including the Groq API key) are read from `backend/rag/.env` by `backend/rag/app/config.py`; `backend/rag/README.md` lists every variable and its default. The first run downloads the FastEmbed MiniLM model (~90 MB, cached under `backend/rag/data/models`).
 
 Then, in `backend/.env`, turn the feature on:
 
 ```text
 RAG_SERVICE_ENABLED=1
+# RAG_SERVICE_URL=http://127.0.0.1:8100   # default; must match RAG_PORT in backend/rag/.env
 ```
-
-and make sure the URL `rag.ts` calls matches the address the service is listening on. The first run downloads the FastEmbed MiniLM model.
 
 The service uses FastEmbed MiniLM embeddings through ONNX, a dedicated SQLite vector index with FTS5 keyword fallback, and Groq for structured report generation.
 
@@ -351,13 +351,19 @@ The same Twilio credentials also power appointment reminders (see [Appointments]
 
 ## Tests
 
-The backend has a `vitest` suite covering the OTP lifecycle (issuing, verifying, expiry, wrong-code lockout, the daily send cap — the code path gating patient login), the self-service booking workflow (approval transaction, duplicate-pending guard, ownership scoping, attachment purge), and the RAG report flow's persistence layer (vector math, chunk builders, patient scoping, FTS fallback, chunk re-parenting at approval, notification ownership). Run it from `backend/`:
+The backend has a `vitest` suite covering the OTP lifecycle (issuing, verifying, expiry, wrong-code lockout, the daily send cap — the code path gating patient login), the self-service booking workflow (approval transaction, duplicate-pending guard, ownership scoping, attachment purge), and the Node-side RAG client (its opt-in configuration guard and how it maps the Python service's 502/503 onto the backend's own error names). Run it from `backend/`:
 
 ```
 npm test
 ```
 
-It runs against an isolated throwaway SQLite file (via `PULSEID_DB_PATH`), never the real dev database. A GitHub Actions workflow (`.github/workflows/ci.yml`) runs this plus both backend and frontend builds on every push and PR.
+The RAG pipeline itself — chunk building, embeddings, the SQLite vector index, FTS5 fallback, patient scoping, and re-parenting — is covered by the Python service's `pytest` suite under `backend/rag/tests/`:
+
+```
+npm run rag:test            # from backend/ — or `python -m pytest tests` inside backend/rag/
+```
+
+Both suites run against isolated throwaway databases (the Node suite via `PULSEID_DB_PATH`, the Python suite via its own temporary index file), never the real dev data.
 
 ## Security notes
 

@@ -4,7 +4,7 @@ Verified working end-to-end (backend + frontend booted together, every route
 below hit and confirmed, including risk scoring and the follow-up sweep)
 before this was packaged.
 
-## 1. Start it (two terminals)
+## 1. Start it (two terminals, plus an optional third for Beat 7)
 
 ```bash
 # Terminal 1 — backend
@@ -20,7 +20,16 @@ npm install
 npm run dev                  # starts on :3000
 ```
 
-Open **http://localhost:3000**.
+Open **http://localhost:3000**. Beat 7 (AI-drafted report) additionally needs
+the standalone Python RAG service running — do this once for that beat:
+
+```bash
+# Terminal 3 — optional, only for Beat 7
+cd backend/rag
+cp .env.example .env        # then set GROQ_API_KEY (key from console.groq.com)
+pip install -r requirements.txt
+python run.py               # RAG service on :8100; backend/.env needs RAG_SERVICE_ENABLED=1
+```
 
 ## 2. Demo script (~4 minutes core, ~5 with the optional Beat 6)
 
@@ -71,18 +80,22 @@ alerts list right away. Point out: both the risk score and the alert flag
 are plain rule-based thresholds, not opaque ML — whoever's looking at
 either one can see exactly why it fired.
 
-**Beat 7 — optional: AI-drafted report (RAG) (90s, needs `GROQ_API_KEY`)**
+**Beat 7 — optional: AI-drafted report (RAG) (90s, needs the RAG service
+running with `GROQ_API_KEY` in `backend/rag/.env`)**
 
 On the same patient's page, add a visit typing ONLY keywords in the notes
 ("fever 4 days, headache, ?dengue, paracetamol, CBC test"). On that visit's
-timeline card click **✦ Draft full report with AI** — in seconds the RAG
-pipeline retrieves this patient's profile, past visits and any uploaded
-report PDFs, and Groq drafts a structured report with every prescription
-labelled (dose, frequency, duration, instructions). Edit anything, then
-**Approve & send to patient** — the patient's bell badge lights up
-instantly. Point out: the AI never saves anything by itself (doctor
-approves), the retrieval is local embeddings on SQLite, and the citations
-name the visits/reports each claim came from.
+timeline card click **✦ Draft full report with AI** — in seconds the
+standalone Python RAG service (`backend/rag/`) retrieves this patient's
+profile, past visits and any uploaded report PDFs, and Groq drafts a
+structured report with every prescription labelled (dose, frequency,
+duration, instructions). Edit anything, then **Approve & send to patient** —
+the patient's bell badge lights up instantly. Point out: the AI never saves
+anything by itself (doctor approves), the retrieval is local embeddings on
+the service's own SQLite index, and the citations name the visits/reports
+each claim came from. Start the service (Terminal 3 above) and set
+`RAG_SERVICE_ENABLED=1` in `backend/.env` first, or the button answers
+"not configured".
 
 ## 3. Login cheat-sheet
 
@@ -103,8 +116,11 @@ name the visits/reports each claim came from.
   security demo; wait ~60s or restart the backend to clear it.
 - **Static QR card doesn't resolve** → confirm `qr_is_static = 1` for that
   patient: `sqlite3 backend/data/pulseid.db "SELECT full_name, qr_is_static FROM patients;"`
-- **"Draft report with AI" says not configured** → `backend/.env` has no
-  `GROQ_API_KEY`. Paste a key from <https://console.groq.com/keys> and
-  restart the backend (`.env` is read at startup). The first draft also
-  downloads the local embedding model (~25 MB, once, into
-  `backend/data/models`) — every draft after that is instant-warm.
+- **"Draft report with AI" says not configured** → either `RAG_SERVICE_ENABLED=1`
+  is missing from `backend/.env`, or the standalone RAG service isn't
+  running. Start it (`python run.py` inside `backend/rag/`, or `npm run rag`
+  from `backend/`) and set the flag. The Groq key lives in `backend/rag/.env`,
+  **not** `backend/.env` — paste one from <https://console.groq.com/keys> and
+  restart the RAG service. Its first start downloads the local embedding model
+  (~90 MB, once, into `backend/rag/data/models`) — every draft after that is
+  instant-warm.

@@ -1,5 +1,5 @@
 // Shared minimal-but-faithful schema for repo-level tests that exercise the
-// clinical flow (bookings, records, RAG chunks, notifications). Mirrors the
+// clinical flow (bookings, records, prescriptions, notifications). Mirrors the
 // CREATE TABLE blocks in scripts/seed.js; db.ts's own idempotent migrations
 // layer anything this schema leaves out (e.g. columns added by later
 // migrations run automatically against the test file).
